@@ -146,7 +146,7 @@ export function StartView() {
 
       <div className="rule-note">
         <span>职责边界</span>
-        <p>匹配规则、金额容差、差异分类及任务状态，均以后端返回为准，前端只负责提交和展示。</p>
+        <p>匹配规则、金额容差和差异分类均来自飞书知识规则表，前端只负责提交和展示。</p>
         <span className="contract-ready">接口已预留</span>
       </div>
     </div>

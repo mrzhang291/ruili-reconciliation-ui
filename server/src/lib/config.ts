@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const SERVER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-// 读取 .env 文件（简单实现，不引入 dotenv 依赖，Prisma 已加载 DATABASE_URL）
+// 读取 .env 文件（简单实现，不引入 dotenv 依赖）
 function loadEnvFile() {
   const envPath = path.join(SERVER_ROOT, ".env");
   if (!fs.existsSync(envPath)) return;
@@ -46,6 +46,13 @@ export const config = {
     defaultAgentWorkspace: process.env.CHERRYSTUDIO_DEFAULT_AGENT_WORKSPACE || "",
     lookupTimeoutMs: intFromEnv("CHERRYSTUDIO_LOOKUP_TIMEOUT_MS", 15_000),
     requestTimeoutMs: intFromEnv("CHERRYSTUDIO_REQUEST_TIMEOUT_MS", 20 * 60 * 1000),
+  },
+  lark: {
+    profile: "aad27213",
+    baseToken: process.env.LARK_BASE_TOKEN || "PgrCbbHxyaHtQLsNa8ac1gnLn2f",
+    knowledgeTableId: process.env.LARK_KNOWLEDGE_TABLE_ID || "tbliMWw8XUfbWmuX",
+    taskTableId: process.env.LARK_TASK_TABLE_ID || "tblrpKbGxi38PnIU",
+    reviewTableId: process.env.LARK_REVIEW_TABLE_ID || "tblrlpUs9nlY0dCW",
   },
   maxUploadBytes: 20 * 1024 * 1024, // 20 MB
 };

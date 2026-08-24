@@ -4,7 +4,7 @@
 
 1. 安装完成后，双击桌面的“BillCompare”图标。
 2. 浏览器会自动打开 http://127.0.0.1:3333/。
-3. 首次使用请在“连接设置”中填写 CherryStudio API Key、SSH 密码和数据库密码。
+3. 首次使用请先安装并授权 lark-cli profile aad27213，再在“连接设置”中填写 CherryStudio API Key。
 4. 凭据由 Windows 当前用户加密保存，不会明文写入安装包。
 
 使用前请确认：

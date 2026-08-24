@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { LarkCliError } from "../lib/lark-cli.js";
 
 export class ApiError extends Error {
   constructor(
@@ -28,6 +29,13 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
   if (error instanceof ApiError) {
     return res.status(error.statusCode).json({
       error: { code: error.code, message: error.message, requestId },
+    });
+  }
+
+  if (error instanceof LarkCliError) {
+    console.error("[lark]", error);
+    return res.status(502).json({
+      error: { code: error.code, message: `飞书操作失败：${error.message}`, requestId },
     });
   }
 

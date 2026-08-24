@@ -5,9 +5,9 @@ import test from "node:test";
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 function extractPromptTemplate(fileSource) {
-  const match = fileSource.match(/return `(我有一个对账任务：[\s\S]*?- name: 字符串，drp表单中的商城名称)`/);
+  const match = fileSource.match(/return `(我有一个对账任务：[\s\S]*?不得自行采用服务器内置口径。)`/);
   assert.ok(match, "未找到对账 Prompt 模板");
-  return match[1];
+  return match[1].replaceAll("\r\n", "\n");
 }
 
 async function readBuiltClient() {
@@ -48,9 +48,11 @@ test("routes reconciliation through the HTTP backend", async () => {
     reconciliationService,
     promptTemplate,
     cherryStudio,
+    larkKnowledge,
+    larkCli,
     taskProgress,
     agentOutputContract,
-    schema,
+    larkStore,
     startAll,
   ] = await Promise.all([
     source("../src/features/reconciliation/api/index.ts"),
@@ -67,9 +69,11 @@ test("routes reconciliation through the HTTP backend", async () => {
     source("../server/src/services/reconciliation.ts"),
     source("../src/features/reconciliation/api/prompt.ts"),
     source("../server/src/lib/cherrystudio.ts"),
+    source("../server/src/lib/lark-knowledge.ts"),
+    source("../server/src/lib/lark-cli.ts"),
     source("../server/src/lib/task-progress.ts"),
     source("../docs/agent-output-contract.md"),
-    source("../server/prisma/schema.prisma"),
+    source("../server/src/lib/lark-store.ts"),
     source("../scripts/start-all.mjs"),
   ]);
 
@@ -103,47 +107,52 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(serverTasks, /getTaskProgress/);
   assert.match(serverTasks, /tasksRouter\.delete/);
   assert.match(serverTasks, /tasksRouter\.post\("\/:id\/stop"/);
-  assert.match(serverTasks, /transaction\.reconciliationTask\.delete/);
-  assert.match(serverTasks, /transaction\.file\.updateMany/);
+  assert.match(serverTasks, /deleteTaskRecord/);
+  assert.match(serverTasks, /listTaskRecords/);
   assert.match(serverFiles, /toUpperCase\(\)/);
   assert.match(reconciliationService, /files\/SETTLEMENT/);
   assert.match(reconciliationService, /files\/ERP/);
   assert.doesNotMatch(reconciliationService, /attemptCount >= 3/);
   assert.doesNotMatch(reconciliationService, /RETRY_LIMIT_REACHED/);
   assert.doesNotMatch(reconciliationService, /data:\s*\{\s*status:\s*TaskStatus\.OBSOLETE/);
-  assert.match(reconciliationService, /每次对账都是独立业务记录/);
-  assert.match(serverReviewItems, /SELECT 1 AS acquired\s+FROM pg_advisory_xact_lock/);
-  assert.doesNotMatch(serverReviewItems, /SELECT pg_advisory_xact_lock/);
+  assert.match(serverReviewItems, /updateReviewRecord/);
+  assert.doesNotMatch(serverReviewItems, /prisma|pg_advisory/i);
   assert.match(cherryStudio, /createAgentSession/);
   assert.match(cherryStudio, /method: "POST"/);
   assert.match(cherryStudio, /buildReconciliationSessionName/);
   assert.match(cherryStudio, /AbortSignal\.timeout/);
-  assert.match(cherryStudio, /normalizeDifferenceDirection/);
+  assert.doesNotMatch(cherryStudio, /normalizeDifferenceDirection|extractSalesAmountDifference/);
   assert.match(cherryStudio, /extractTaskName/);
   assert.match(cherryStudio, /reasoningId \?\?= crypto\.randomUUID\(\)/);
   assert.match(cherryStudio, /details: rawDetail\(event\.input\)/);
   assert.match(cherryStudio, /details: rawDetail\(event\.output\)/);
   assert.match(taskProgress, /findIndex\(\(item\) => item\.id === log\.id\)/);
   assert.match(taskProgress, /maxLogsPerTask = 300/);
-  assert.match(agentOutputContract, /必须且只能包含以下五个字段/);
+  assert.match(agentOutputContract, /必须且只能包含以下七个字段/);
   assert.match(agentOutputContract, /不接受 `issues` 数组/);
-  assert.match(reconciliationService, /ERP 金额 - 结算单金额/);
-  assert.match(reconciliationService, /drp表单中的商城名称/);
-  assert.match(reconciliationService, /SELECT 1 AS acquired\s+FROM pg_advisory_xact_lock/);
-  assert.doesNotMatch(reconciliationService, /SELECT pg_advisory_xact_lock/);
-  assert.match(promptTemplate, /drp表单中的商城名称/);
+  assert.match(reconciliationService, /飞书知识规则快照/);
+  assert.doesNotMatch(reconciliationService, /ERP 金额 - 结算单金额|drp表单中的商城名称/);
+  assert.match(reconciliationService, /applyTaskResult/);
+  assert.doesNotMatch(reconciliationService, /prisma|pg_advisory/i);
+  assert.match(promptTemplate, /飞书知识规则快照/);
   assert.match(promptTemplate, /"issues": ""/);
   assert.match(promptTemplate, /格式必须为 "YYYY-MM"/);
   assert.equal(extractPromptTemplate(reconciliationService), extractPromptTemplate(promptTemplate));
+  assert.match(larkKnowledge, /runLarkCli/);
+  assert.match(larkCli, /"--profile", config\.lark\.profile/);
+  assert.match(larkKnowledge, /"base", "\+record-list"/);
+  assert.match(larkKnowledge, /"--as", "user"/);
+  assert.match(larkKnowledge, /状态.*启用/s);
 
-  assert.match(schema, /provider = "postgresql"/);
-  assert.match(schema, /model ReconciliationTask/);
-  assert.match(schema, /name\s+String\?/);
-  assert.match(schema, /model ReconciliationReviewItem/);
-  assert.match(schema, /model File/);
+  assert.match(larkStore, /"base", "\+record-upsert"/);
+  assert.match(larkStore, /"base", "\+record-upload-attachment"/);
+  assert.match(larkStore, /"base", "\+record-download-attachment"/);
+  assert.match(larkStore, /getTaskStatistics/);
+  assert.doesNotMatch(larkStore, /prisma|postgres/i);
   assert.match(startAll, /npm-cli\.js/);
-  assert.doesNotMatch(startAll, /spawnSync\(npmCommand/);
-  assert.match(startAll, /\[viteCli, "preview"/);
+  assert.match(startAll, /"vite", "bin", "vite\.js"/);
+  assert.match(startAll, /testLark/);
+  assert.doesNotMatch(startAll, /SSH_|prisma|postgres/i);
   assert.match(httpClient, /startupRetryDelaysMs/);
   assert.match(serverTasks, /AGENT_NAME_REQUIRED/);
   assert.match(serverTasks, /agentName 为必填字段/);

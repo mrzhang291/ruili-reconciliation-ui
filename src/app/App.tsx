@@ -35,7 +35,7 @@ export default function Home() {
       .then((response) => response.json())
       .then((payload) => {
         const stored = payload?.data?.stored;
-        if (!stored?.cherryApiKey || !stored?.sshPassword || !stored?.databasePassword) setView("settings");
+        if (!stored?.cherryApiKey) setView("settings");
       })
       .catch(() => setView("settings"));
   }, []);

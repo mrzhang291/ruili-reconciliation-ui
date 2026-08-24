@@ -1,353 +1,92 @@
-import { closeSync, mkdirSync, openSync } from "node:fs";
 import http from "node:http";
-import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import process from "node:process";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
 import { credentialStatus, readCredentials, saveCredentials } from "./local-config.mjs";
-import { ensureAskpassHelper, loadSettings, sshEnvironment } from "./start-all.mjs";
+import { ensureBackend, loadSettings, testLark } from "./start-all.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PORT = 3334;
-const ALLOWED_ORIGINS = new Set(["http://127.0.0.1:3333", "http://localhost:3333"]);
-const START_ALL = path.join(ROOT, "scripts", "start-all.mjs");
-const LOG_DIR = path.join(ROOT, ".runtime", "logs");
-const PRISMA_CLIENT_URL = pathToFileURL(path.join(ROOT, "server", "node_modules", "@prisma", "client", "default.js")).href;
-const DATABASE_PROBE_SOURCE = `
-const { PrismaClient } = await import(process.env.BILLCOMPARE_PRISMA_CLIENT_URL);
-const client = new PrismaClient({ datasources: { db: { url: process.env.BILLCOMPARE_DATABASE_URL } } });
-try {
-  await client.$queryRawUnsafe("SELECT 1");
-} finally {
-  await client.$disconnect();
-}
-`;
+const host = "127.0.0.1";
+const port = 3334;
 
-const responseHeaders = (origin) => ({
-  "Content-Type": "application/json; charset=utf-8",
-  ...(ALLOWED_ORIGINS.has(origin) ? { "Access-Control-Allow-Origin": origin } : {}),
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-});
-
-function send(res, status, payload, origin = "") {
-  res.writeHead(status, responseHeaders(origin));
-  res.end(JSON.stringify(payload));
+function json(res, status, data) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "http://127.0.0.1:3333" });
+  res.end(JSON.stringify(data));
 }
 
-async function readBody(req) {
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 32 * 1024) throw new Error("请求内容过大");
-  }
-  return body ? JSON.parse(body) : {};
-}
-
-function askpassEnv(password) {
-  return sshEnvironment({
-    ...process.env,
-    BILLCOMPARE_SSH_PASSWORD: password,
-    DISPLAY: "billcompare",
-    SSH_ASKPASS: ensureAskpassHelper(),
-    SSH_ASKPASS_REQUIRE: "force",
-  });
-}
-
-function sshArgs(settings) {
-  return [
-    "-p", String(settings.sshPort),
-    "-o", "BatchMode=no",
-    "-o", "ConnectTimeout=10",
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "NumberOfPasswordPrompts=1",
-    "-o", "PreferredAuthentications=password,keyboard-interactive",
-    "-o", "PubkeyAuthentication=no",
-  ];
-}
-
-function runSsh(settings, password, remoteCommand, input = "") {
-  return new Promise((resolve, reject) => {
-    const child = spawn("ssh", [
-      ...sshArgs(settings),
-      `${settings.sshUser}@${settings.sshHost}`,
-      remoteCommand,
-    ], {
-      cwd: ROOT,
-      env: askpassEnv(password),
-      stdio: ["pipe", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let errorText = "";
-    child.stderr.on("data", (chunk) => { errorText += String(chunk).slice(0, 1000); });
-    child.stdin.end(input);
-    const timer = setTimeout(() => child.kill(), 15_000);
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(errorText || "SSH 命令执行失败"));
-    });
-  });
-}
-
-const portOpen = (port) => new Promise((resolve) => {
-  const socket = net.createConnection({ host: "127.0.0.1", port });
-  socket.setTimeout(500);
-  socket.once("connect", () => { socket.destroy(); resolve(true); });
-  socket.once("error", () => resolve(false));
-  socket.once("timeout", () => { socket.destroy(); resolve(false); });
-});
-
-const freePort = () => new Promise((resolve, reject) => {
-  const server = net.createServer();
-  server.once("error", reject);
-  server.listen(0, "127.0.0.1", () => {
-    const address = server.address();
-    server.close(() => resolve(address.port));
-  });
-});
-
-const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-export async function backendHealthy(port) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-      signal: AbortSignal.timeout(3_000),
-    });
-    const payload = await response.json();
-    return response.ok && payload?.data?.service === "billcompare" && payload.data.database === "ok";
-  } catch {
-    return false;
-  }
-}
-
-async function waitForBackend(port) {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (await backendHealthy(port)) return true;
-    await delay(1_000);
-  }
-  return false;
-}
-
-async function openTestTunnel(settings, password) {
-  const localPort = await freePort();
-  const child = spawn("ssh", [
-    ...sshArgs(settings),
-    "-N",
-    "-o", "ExitOnForwardFailure=yes",
-    "-L", `127.0.0.1:${localPort}:${settings.remoteDatabaseHost}:${settings.remoteDatabasePort}`,
-    `${settings.sshUser}@${settings.sshHost}`,
-  ], {
-    cwd: ROOT,
-    env: askpassEnv(password),
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await delay(250);
-    if (await portOpen(localPort)) return { child, localPort };
-    if (child.exitCode !== null) break;
-  }
-  child.kill();
-  throw new Error("SSH 隧道建立失败");
+async function body(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text ? JSON.parse(text) : {};
 }
 
 async function testCherry(apiKey, settings) {
   if (!apiKey) throw new Error("请填写 CherryStudio API Key");
-  const baseUrl = (settings.values.CHERRYSTUDIO_BASE_URL || "http://127.0.0.1:24333").replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/v1/agents?limit=1&offset=0`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(10_000),
+  const baseUrl = settings.values.CHERRYSTUDIO_BASE_URL || "http://127.0.0.1:23333";
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/agents?limit=1`, {
+    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(10_000),
   });
-  if (!response.ok) throw new Error(`CherryStudio 鉴权失败（HTTP ${response.status}）`);
-}
-
-async function testSsh(password, settings) {
-  if (password) {
-    await runSsh(settings, password, "true");
-    return;
-  }
-  await new Promise((resolve, reject) => {
-    const child = spawn("ssh", [
-      "-p", String(settings.sshPort),
-      "-o", "BatchMode=yes",
-      "-o", "ConnectTimeout=10",
-      `${settings.sshUser}@${settings.sshHost}`,
-      "true",
-    ], { cwd: ROOT, env: sshEnvironment(), stdio: "ignore", windowsHide: true });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error("SSH 登录失败")));
-  });
-}
-
-async function testDatabase(databasePassword, sshPassword, settings) {
-  if (!databasePassword) throw new Error("请填写数据库密码");
-  const tunnel = sshPassword
-    ? await openTestTunnel(settings, sshPassword)
-    : { child: null, localPort: settings.localDatabasePort };
-  if (!sshPassword && !(await portOpen(settings.localDatabasePort))) {
-    throw new Error("请填写 SSH 密码，或先建立 SSH 隧道");
-  }
-  try {
-    const url = new URL(settings.values.DATABASE_URL || "postgresql://billcompare:password@127.0.0.1:5433/billcompare?schema=public");
-    url.hostname = "127.0.0.1";
-    url.port = String(tunnel.localPort);
-    url.password = encodeURIComponent(databasePassword);
-    await runDatabaseProbe(url.toString());
-  } finally {
-    tunnel.child?.kill();
-  }
-}
-
-export function runDatabaseProbe(databaseUrl, prismaClientUrl = PRISMA_CLIENT_URL) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", DATABASE_PROBE_SOURCE], {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        BILLCOMPARE_DATABASE_URL: databaseUrl,
-        BILLCOMPARE_PRISMA_CLIENT_URL: prismaClientUrl,
-      },
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let errorText = "";
-    child.stderr.on("data", (chunk) => { errorText += String(chunk).slice(0, 4000); });
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(errorText || "数据库连接测试失败"));
-    });
-  });
+  if (!response.ok) throw new Error(`CherryStudio HTTP ${response.status}`);
 }
 
 export function friendlyConnectionError(target, error) {
   const message = error instanceof Error ? error.message : String(error);
-  const code = error && typeof error === "object" && "code" in error ? error.code : "";
-  if (target === "cherry") {
-    if (/HTTP (401|403)/.test(message)) return "API Key 不正确或已失效";
-    if (/timeout|aborted/i.test(message) || error?.name === "TimeoutError") return "CherryStudio 响应超时，请确认 API 服务已启动";
-    return "无法连接 CherryStudio，请确认应用和 API 服务已启动";
-  }
-  if (target === "ssh") {
-    if (/Permission denied|authentication failed/i.test(message)) return "SSH 密码不正确";
-    if (/timed out|refused|No route|Could not resolve/i.test(message)) return "无法连接 SSH 服务器，请检查网络";
-    return "SSH 登录失败，请检查密码后重试";
-  }
-  if (code === "MODULE_NOT_FOUND" && /\.prisma\/client/.test(message)) return "数据库组件未就绪，请重新启动应用";
-  if (code === "P1000" || /Authentication failed/i.test(message)) return "数据库密码不正确";
-  if (code === "P1001" || /Can't reach database server/i.test(message)) return "无法连接数据库，请稍后重试";
-  if (code === "P1010" || /denied access/i.test(message)) return "数据库账号无权访问 billcompare 数据库";
-  return "数据库连接失败，请检查数据库密码";
+  if (target === "cherry" && /401|403/.test(message)) return "API Key 不正确或已失效";
+  if (target === "lark" && /auth|login|授权|token|profile/i.test(message)) return "飞书授权失效，请重新授权 aad27213 配置";
+  return message;
 }
 
-function result(promise, successMessage, target) {
-  return promise.then(
-    () => ({ status: "ok", message: successMessage }),
-    (error) => ({ status: "error", message: friendlyConnectionError(target, error) }),
-  );
+async function result(operation, success, target) {
+  try { await operation; return { status: "ok", message: success }; }
+  catch (error) { return { status: "error", message: friendlyConnectionError(target, error) }; }
 }
 
-function resolvedCredentials(input) {
-  const saved = readCredentials();
-  return {
-    cherryApiKey: input.cherryApiKey || saved.cherryApiKey,
-    sshPassword: input.sshPassword || saved.sshPassword,
-    databasePassword: input.databasePassword || saved.databasePassword,
-  };
-}
-
-async function testAll(input) {
-  const credentials = resolvedCredentials(input);
+async function testAndSave(input) {
   const settings = loadSettings();
-  const [cherry, ssh] = await Promise.all([
-    result(testCherry(credentials.cherryApiKey, settings), "CherryStudio 连接正常", "cherry"),
-    result(testSsh(credentials.sshPassword, settings), "SSH 登录正常", "ssh"),
+  const saved = readCredentials();
+  const cherryApiKey = typeof input.cherryApiKey === "string" && input.cherryApiKey ? input.cherryApiKey : saved.cherryApiKey;
+  const [cherry, lark] = await Promise.all([
+    result(testCherry(cherryApiKey, settings), "CherryStudio 连接正常", "cherry"),
+    result(Promise.resolve().then(() => testLark(settings)), "飞书多维表格连接正常", "lark"),
   ]);
-  const database = ssh.status === "ok"
-    ? await result(testDatabase(credentials.databasePassword, credentials.sshPassword, settings), "数据库连接正常", "database")
-    : { status: "skipped", message: "SSH 连接成功后再检测数据库" };
+  const credentialsOk = cherry.status === "ok" && lark.status === "ok";
+  if (credentialsOk && input.cherryApiKey) saveCredentials({ cherryApiKey: input.cherryApiKey });
+  const backend = credentialsOk
+    ? await result((async () => {
+        if (!await ensureBackend(settings, cherryApiKey)) throw new Error("本地兼容接口未通过健康检查");
+      })(), "本地兼容接口已启动", "backend")
+    : { status: "skipped", message: "连接检查未全部通过" };
   return {
-    credentials,
-    results: { cherry, ssh, database },
-    ok: cherry.status === "ok" && ssh.status === "ok" && database.status === "ok",
+    ok: credentialsOk && backend.status === "ok", credentialsOk,
+    results: { cherry, lark, backend }, stored: credentialStatus(),
   };
 }
 
-function resumeStartup() {
-  mkdirSync(LOG_DIR, { recursive: true });
-  const output = openSync(path.join(LOG_DIR, "resume-startup.log"), "a");
-  const child = spawn(process.execPath, [START_ALL, "--resume", "--no-browser"], {
-    cwd: ROOT,
-    env: sshEnvironment(),
-    detached: true,
-    stdio: ["ignore", output, output],
-    windowsHide: true,
-  });
-  child.unref();
-  closeSync(output);
-}
-
-const server = http.createServer(async (req, res) => {
-  const origin = req.headers.origin || "";
-  if (origin && !ALLOWED_ORIGINS.has(origin)) return send(res, 403, { error: "不允许的请求来源" });
-  if (req.method === "OPTIONS") return send(res, 204, {}, origin);
+export function createConfigServer() {
+  return http.createServer(async (req, res) => {
   try {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "http://127.0.0.1:3333",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      });
+      return res.end();
+    }
     if (req.method === "GET" && req.url === "/api/config") {
-      const settings = loadSettings();
-      return send(res, 200, {
-        data: {
-          stored: credentialStatus(),
-          secureStorage: process.platform === "darwin" ? "macOS 钥匙串" : "Windows DPAPI",
-          connection: {
-            sshHost: settings.sshHost,
-            sshPort: settings.sshPort,
-            sshUser: settings.sshUser,
-            databaseUser: new URL(settings.values.DATABASE_URL).username,
-          },
-        },
-      }, origin);
+      return json(res, 200, { data: {
+        stored: credentialStatus(), secureStorage: process.platform === "darwin" ? "macOS 钥匙串" : "Windows 当前用户加密",
+        larkProfile: "aad27213",
+      } });
     }
     if (req.method === "POST" && req.url === "/api/config/test-and-save") {
-      const checked = await testAll(await readBody(req));
-      let restarting = false;
-      let backend = { status: "skipped", message: "连接凭据通过后再启动业务后端" };
-      let ok = false;
-      if (checked.ok) {
-        saveCredentials(checked.credentials);
-        const { backendPort } = loadSettings();
-        ok = await backendHealthy(backendPort);
-        if (!ok) {
-          restarting = true;
-          resumeStartup();
-          ok = await waitForBackend(backendPort);
-        }
-        backend = ok
-          ? { status: "ok", message: "业务后端已启动并通过健康检查" }
-          : { status: "error", message: `业务后端启动失败，请查看 ${path.join(LOG_DIR, "resume-startup.log")}` };
-      }
-      return send(res, ok ? 200 : checked.ok ? 503 : 422, {
-        data: {
-          ok,
-          credentialsOk: checked.ok,
-          restarting,
-          results: { ...checked.results, backend },
-          stored: credentialStatus(),
-        },
-      }, origin);
+      return json(res, 200, { data: await testAndSave(await body(req)) });
     }
-    return send(res, 404, { error: "接口不存在" }, origin);
+    return json(res, 404, { error: "接口不存在" });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "操作失败";
-    return send(res, 400, { error: message }, origin);
+    return json(res, 500, { error: error instanceof Error ? error.message : "配置服务异常" });
   }
-});
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`[配置服务] http://127.0.0.1:${PORT}`);
   });
 }
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) createConfigServer().listen(port, host, () => console.log(`[config] http://${host}:${port}`));

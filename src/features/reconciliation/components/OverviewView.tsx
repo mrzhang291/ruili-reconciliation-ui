@@ -133,7 +133,7 @@ export function OverviewView() {
                         disabled={record.status === "processing" || deletingTaskId === record.id}
                         onClick={(event) => {
                           event.stopPropagation();
-                          const confirmed = window.confirm("确定永久删除这条对账任务吗？相关审核数据和服务器原始文件也会一并删除，此操作无法撤销。");
+                          const confirmed = window.confirm("确定永久删除这条对账任务吗？相关审核数据和飞书附件也会一并删除，此操作无法撤销。");
                           if (confirmed) void deleteTask(record.id);
                         }}
                       >{deletingTaskId === record.id ? "…" : "×"}</button>

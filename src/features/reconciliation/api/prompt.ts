@@ -1,4 +1,4 @@
-// 文件说明：根据上传后的文件 URL 生成 CherryStudio 对账 agent 的消息内容。
+// 文件说明：保留前端提示词构造契约；业务规则由服务端从飞书知识规则表加载。
 import { getReconciliationFileMetadata } from "../model/file-rules";
 import type { CreateReconciliationTaskInput } from "../model/types";
 
@@ -76,30 +76,22 @@ ${params.taskWorkDir}
 
 {
   "matched": true,
+  "erpAmount": 100.00,
+  "settlementAmount": 100.00,
   "difference": 0.00,
   "issues": "",
   "period": "XXXX-XX",
   "name": "商城名称A"
 }
 
-或者：
-
-{
-  "matched": false,
-  "difference": 1500.00,
-  "issues": "DRP 中有 16% 和 17% 两档扣点，而结算单全部按 17% 计算。可能存在退款记录未同步。",
-  "period": "XXXX-XX",
-  "name": "商城名称A"
-}
-
-其中：
-- matched：true 表示两方金额一致；false 表示存在差异
-- difference：ERP 金额 - 结算单金额，单位为元
-  - difference正数：ERP 多计，结算单少计
-  - difference负数：ERP 少计，结算单多计
-  - difference为0：金额一致
-- issues: 字符串，列出造成差异的疑似原因；如果金额一致或未发现疑似原因，输出""
+其中字段类型必须依次为：
+- matched：布尔值
+- erpAmount：有限数字，ERP/DRP 销售额合计
+- settlementAmount：有限数字，结算单净营业额合计
+- difference：有限数字
+- issues：字符串；没有内容时输出空字符串
 - period: 字符串，对账月份，格式必须为 "YYYY-MM"
-- name: 字符串，drp表单中的商城名称`
+- name: 非空字符串，商城名称
 
+字段业务含义、计算口径和适用范围只以本次 Session 中加载的飞书知识规则快照为准，不得自行采用服务器内置口径。`;
 }

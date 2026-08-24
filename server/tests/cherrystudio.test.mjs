@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   parseAgentResponse,
   readSseFinalText,
-  RECONCILIATION_AGENT_INSTRUCTIONS,
   resolveAgentSession,
 } from "../dist/lib/cherrystudio.js";
 import { config } from "../dist/lib/config.js";
@@ -11,6 +10,8 @@ import { buildReconciliationPrompt } from "../dist/services/reconciliation.js";
 
 const contractResult = (overrides = {}) => ({
   matched: false,
+  erpAmount: 99,
+  settlementAmount: 100,
   difference: -1,
   issues: "结算单比 ERP 多计 1 元。",
   period: "2026-05",
@@ -18,11 +19,13 @@ const contractResult = (overrides = {}) => ({
   ...overrides,
 });
 
-test("parses the exact five-field Agent result and creates a review item", () => {
+test("parses the exact seven-field Agent result and creates a review item", () => {
   const payload = contractResult({ difference: -5, issues: "结算金额比 ERP 多 5 元。" });
   const result = parseAgentResponse(JSON.stringify(payload));
 
   assert.equal(result?.difference, -5);
+  assert.equal(result?.erpAmount, 99);
+  assert.equal(result?.settlementAmount, 100);
   assert.equal(result?.issues[0].differenceAmount, -5);
   assert.equal(result?.issues[0].message, "结算金额比 ERP 多 5 元。");
   assert.equal(result?.name, "京东商城");
@@ -104,35 +107,37 @@ test("creates a reviewable summary when only a total difference is returned", ()
   assert.equal(result?.issues[0].differenceAmount, 17);
 });
 
-test("corrects a wrong Agent total from explicit ERP and settlement sales amounts", () => {
+test("does not override the Agent result with server-side business rules", () => {
   const issues = "ERP 中有 16% 和 17% 两档扣点（16%档销售额 86175 元），而结算单全部按 17% 计算；且 ERP 方未体现结算单中的调整项费用（合计 13,272.58 元）。此外 ERP 总销售额 512,042 与结算单净营业额 512,047 存在 5 元差异。";
   const result = parseAgentResponse(JSON.stringify(contractResult({
     difference: 15855.61,
     issues,
   })));
 
-  assert.equal(result?.difference, -5);
-  assert.equal(result?.issues[0].differenceAmount, -5);
+  assert.equal(result?.difference, 15855.61);
+  assert.equal(result?.issues[0].differenceAmount, 15855.61);
   assert.equal(result?.rawAgentPayload.difference, 15855.61);
   assert.equal(result?.rawAgentPayload.issues, issues);
 });
 
-test("corrects a concise sales-total explanation without confusing adjustment amounts", () => {
+test("keeps the reported difference even when issues contain other amounts", () => {
   const result = parseAgentResponse(JSON.stringify(contractResult({
     difference: 857.6,
     issues: "两方营业额口径差5元（ERP 512042元、结算单512047元），另有调整项 13272.58 元。",
   })));
 
-  assert.equal(result?.difference, -5);
-  assert.equal(result?.issues[0].differenceAmount, -5);
+  assert.equal(result?.difference, 857.6);
+  assert.equal(result?.issues[0].differenceAmount, 857.6);
 });
 
-test("requires exactly the five documented fields and their documented types", () => {
+test("requires exactly the seven documented fields and their documented types", () => {
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ name: "" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ name: undefined }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ period: "2026年-05月" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ period: "2026-13" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ difference: "-1" }))), null);
+  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ erpAmount: "99" }))), null);
+  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ settlementAmount: null }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ issues: [] }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ issues: undefined }))), null);
   assert.equal(parseAgentResponse(JSON.stringify({ ...contractResult(), extra: true })), null);
@@ -160,6 +165,7 @@ test("paginates agents and creates a new session", async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = config.cherryStudio.apiKey;
   const calls = [];
+  const knowledgeInstructions = "来自飞书的本次规则快照";
   config.cherryStudio.apiKey = "test-api-key";
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
@@ -177,16 +183,14 @@ test("paginates agents and creates a new session", async () => {
       assert.equal(init.method, "POST");
       const body = JSON.parse(String(init.body));
       assert.match(body.name, /^对账-/);
-      assert.equal(body.instructions, RECONCILIATION_AGENT_INSTRUCTIONS);
-      assert.match(body.instructions, /difference 必须是 -5\.00/);
-      assert.match(body.instructions, /不得在项目根目录或源码目录创建任何文件/);
+      assert.equal(body.instructions, knowledgeInstructions);
       return Response.json({ data: { session: { id: "session-new" } } }, { status: 201 });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
 
   try {
-    const target = await resolveAgentSession({ name: "锐力" });
+    const target = await resolveAgentSession({ name: "锐力" }, knowledgeInstructions);
     assert.deepEqual(target, {
       agentId: "agent-target",
       agentName: "锐力",

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const CREDENTIALS_PATH = path.join(ROOT, ".runtime", "config", "credentials.json");
-const credentialNames = ["cherryApiKey", "sshPassword", "databasePassword"];
+const credentialNames = ["cherryApiKey"];
 const KEYCHAIN_SERVICE = "com.ruili.reconciliation";
 
 function runDpapi(mode, value) {

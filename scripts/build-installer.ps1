@@ -66,27 +66,6 @@ if (-not (Test-Path -LiteralPath $npmCli)) {
 }
 Copy-Tree -Source $nodeRoot -Destination (Join-Path $stageRoot 'runtime\node')
 
-$gitSshPath = Get-Command git.exe -All -ErrorAction SilentlyContinue |
-    ForEach-Object {
-        $gitRoot = Split-Path -Parent (Split-Path -Parent $_.Source)
-        $candidate = Join-Path $gitRoot 'usr\bin\ssh.exe'
-        if (Test-Path -LiteralPath $candidate) { $candidate }
-    } |
-    Select-Object -First 1
-if (-not $gitSshPath) {
-    throw '未找到 Git for Windows 的 ssh.exe。请先安装 Git for Windows。'
-}
-$sshRoot = Split-Path -Parent $gitSshPath
-$sshLicenses = Join-Path (Split-Path -Parent $sshRoot) 'share\licenses'
-$sshLicense = Join-Path $sshLicenses 'openssh\LICENCE'
-if (-not (Test-Path -LiteralPath $sshLicense)) {
-    throw "Git for Windows 的 OpenSSH 许可证不存在：$sshLicense"
-}
-$bundledSshRoot = Join-Path $stageRoot 'tools\OpenSSH'
-Copy-Tree -Source $sshRoot -Destination $bundledSshRoot
-Copy-Tree -Source $sshLicenses -Destination (Join-Path $bundledSshRoot 'licenses')
-Copy-Item -LiteralPath $sshLicense -Destination (Join-Path $bundledSshRoot 'LICENSE.txt')
-
 Copy-Item -LiteralPath (Join-Path $packagingRoot 'start-billcompare.cmd') -Destination $stageRoot
 Copy-Item -LiteralPath (Join-Path $packagingRoot 'stop-billcompare.cmd') -Destination $stageRoot
 Copy-Item -LiteralPath (Join-Path $packagingRoot 'stop-billcompare.ps1') -Destination $stageRoot

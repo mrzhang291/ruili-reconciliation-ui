@@ -26,11 +26,15 @@ export type CherryIssue = {
 export type CherryParseResult = {
   name: string;
   matched: boolean;
+  erpAmount: number;
+  settlementAmount: number;
   difference: number;
   issues: CherryIssue[];
   period: string;
   rawAgentPayload: {
     matched: boolean;
+    erpAmount: number;
+    settlementAmount: number;
     difference: number;
     issues: string;
     period: string;
@@ -60,18 +64,6 @@ export type CherryLogEmitter = (
   message: string,
   options?: CherryLogOptions,
 ) => void;
-
-export const RECONCILIATION_AGENT_INSTRUCTIONS = `你是锐力对账 Agent。请严格遵守以下对账口径：
-
-1. difference 的唯一计算方式是：ERP/DRP 表单中的销售额合计 - 结算单中的净营业额（或同义的本月结算营业额小计）。
-2. 必须直接读取两份原始文件中的上述两个销售额数字并相减，再用同一组数字复算一次。
-3. 扣点后的结算额、回款小计、调整项、手续费、管理费、税额、发票金额和本期应付总额都不能参与 difference 的计算；这些内容只能作为疑似问题写入 issues。
-4. 不得把 issues 中提到的扣点差异、调整项或各类费用相加后作为 difference。
-5. difference 保留正负号。例如 ERP/DRP 销售额为 512042 元、结算单净营业额为 512047 元时，difference 必须是 -5.00。
-6. matched 仅由上述口径的 difference 是否为 0 决定。
-7. 如需下载、拆页、渲染、OCR 或生成 Markdown，所有中间文件只能写入用户消息指定的本次任务临时目录，不得在项目根目录或源码目录创建任何文件。
-
-最终结果的字段、格式和输出方式严格遵守用户消息中的要求。`;
 
 type CherryListResponse<T> = {
   data?: T[];
@@ -165,7 +157,7 @@ function buildReconciliationSessionName() {
   return `对账-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
-async function createAgentSession(agent: CherryAgent, signal?: AbortSignal) {
+async function createAgentSession(agent: CherryAgent, instructions: string, signal?: AbortSignal) {
   const response = await fetch(
     `${config.cherryStudio.baseUrl}/v1/agents/${encodeURIComponent(agent.id)}/sessions`,
     {
@@ -177,7 +169,7 @@ async function createAgentSession(agent: CherryAgent, signal?: AbortSignal) {
       },
       body: JSON.stringify({
         name: buildReconciliationSessionName(),
-        instructions: RECONCILIATION_AGENT_INSTRUCTIONS,
+        instructions,
       }),
       signal: requestSignal(config.cherryStudio.lookupTimeoutMs, signal),
     },
@@ -218,6 +210,7 @@ function extractSession(input: unknown): CherrySession | undefined {
  */
 export async function resolveAgentSession(
   selector: AgentSelector,
+  instructions: string,
   onLog?: CherryLogEmitter,
   signal?: AbortSignal,
 ): Promise<CherryAgentSession> {
@@ -254,7 +247,7 @@ export async function resolveAgentSession(
   const agent = matches[0];
   onLog?.("success", `已匹配 Agent：${agent.name}`);
   onLog?.("info", "正在创建本次对账 Session…");
-  const session = await createAgentSession(agent, signal);
+  const session = await createAgentSession(agent, instructions, signal);
   onLog?.("success", `Session 已创建：${session.id}`);
 
   return { agentId: agent.id, agentName: agent.name, sessionId: session.id };
@@ -304,7 +297,7 @@ export async function sendReconciliationPrompt(
     const parsed = parseAgentResponse(finalText);
     if (!parsed) {
       throw new CherryStudioError(
-        "Agent 返回格式不符合 { matched, difference, issues, period, name } 契约",
+        "Agent 返回格式不符合 { matched, erpAmount, settlementAmount, difference, issues, period, name } 契约",
         "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
       );
     }
@@ -320,7 +313,7 @@ export async function sendReconciliationPrompt(
   const parsed = parseAgentResponse(text);
   if (!parsed) {
     throw new CherryStudioError(
-      "Agent 返回格式不符合 { matched, difference, issues, period, name } 契约",
+      "Agent 返回格式不符合 { matched, erpAmount, settlementAmount, difference, issues, period, name } 契约",
       "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
     );
   }
@@ -606,9 +599,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function extractResult(input: unknown): CherryParseResult | null {
   if (!isRecord(input)) return null;
 
-  // 顶层必须符合 { matched, difference, issues, period, name } 契约。
+  // 顶层必须符合七字段契约。
   if (typeof input.matched === "boolean") {
-    const expectedKeys = ["matched", "difference", "issues", "period", "name"];
+    const expectedKeys = [
+      "matched",
+      "erpAmount",
+      "settlementAmount",
+      "difference",
+      "issues",
+      "period",
+      "name",
+    ];
     const inputKeys = Object.keys(input);
     if (inputKeys.length !== expectedKeys.length || !expectedKeys.every((key) => inputKeys.includes(key))) {
       return null;
@@ -617,36 +618,52 @@ function extractResult(input: unknown): CherryParseResult | null {
     const reportedDifference = typeof input.difference === "number" && Number.isFinite(input.difference)
       ? input.difference
       : null;
+    const erpAmount = typeof input.erpAmount === "number" && Number.isFinite(input.erpAmount)
+      ? input.erpAmount
+      : null;
+    const settlementAmount = typeof input.settlementAmount === "number" && Number.isFinite(input.settlementAmount)
+      ? input.settlementAmount
+      : null;
     const name = extractTaskName(input.name);
     const period = extractPeriod(input);
-    if (reportedDifference === null || !name || !period || typeof input.issues !== "string") return null;
+    if (
+      reportedDifference === null
+      || erpAmount === null
+      || settlementAmount === null
+      || !name
+      || !period
+      || typeof input.issues !== "string"
+    ) return null;
 
     const issueSummary = input.issues.trim();
-    const difference = extractSalesAmountDifference(issueSummary) ?? reportedDifference;
     const rawAgentPayload = {
       matched: input.matched,
+      erpAmount,
+      settlementAmount,
       difference: reportedDifference,
       issues: input.issues,
       period,
       name,
     };
 
-    return finalizeAgentResult(normalizeDifferenceDirection({
+    return finalizeAgentResult({
       name,
       matched: input.matched,
-      difference,
+      erpAmount,
+      settlementAmount,
+      difference: reportedDifference,
       issues: issueSummary
         ? [{
             rowLabel: "疑似问题",
             fieldName: "疑似问题",
-            differenceAmount: difference,
+            differenceAmount: reportedDifference,
             message: issueSummary,
             suggestion: null,
           }]
         : [],
       period,
       rawAgentPayload,
-    }));
+    });
   }
 
   // 嵌套在 data / result / message.content / choices[0].message.content 里
@@ -689,80 +706,6 @@ function extractPeriod(input: Record<string, unknown>) {
   return /^\d{4}-(0[1-9]|1[0-2])$/.test(normalized) ? normalized : null;
 }
 
-/** Prefer the source sales totals when the Agent explanation states both sides explicitly. */
-function extractSalesAmountDifference(issueSummary: string): number | null {
-  const amount = "([+-]?\\d[\\d,]*(?:\\.\\d+)?)";
-  const erpPattern = new RegExp(
-    `ERP(?:\\s*(?:方|中|的))?\\s*(?:总销售额|销售额(?:合计)?|总营业额|营业额(?:合计)?)\\s*(?:为|是|[:：=])?\\s*${amount}`,
-    "iu",
-  );
-  const settlementPattern = new RegExp(
-    `结算单(?:\\s*(?:中|的))?\\s*(?:净营业额|总销售额|销售额(?:合计)?|总营业额|营业额(?:合计)?)\\s*(?:为|是|[:：=])?\\s*${amount}`,
-    "iu",
-  );
-  const erpAmount = monetaryCapture(issueSummary.match(erpPattern)?.[1]);
-  const settlementAmount = monetaryCapture(issueSummary.match(settlementPattern)?.[1]);
-  if (erpAmount !== null && settlementAmount !== null) {
-    return Number((erpAmount - settlementAmount).toFixed(2));
-  }
-
-  const concisePair = issueSummary.match(
-    /(?:营业额|销售额)[^（）()]{0,40}[（(][^）)]*ERP\s*([+-]?\d[\d,]*(?:\.\d+)?)\s*元?[^）)]*结算单\s*([+-]?\d[\d,]*(?:\.\d+)?)\s*元?[^）)]*[）)]/iu,
-  );
-  const conciseErpAmount = monetaryCapture(concisePair?.[1]);
-  const conciseSettlementAmount = monetaryCapture(concisePair?.[2]);
-  return conciseErpAmount !== null && conciseSettlementAmount !== null
-    ? Number((conciseErpAmount - conciseSettlementAmount).toFixed(2))
-    : null;
-}
-
-function monetaryCapture(value: string | undefined): number | null {
-  if (!value) return null;
-  const parsed = Number(value.replaceAll(",", ""));
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/** Keep every monetary difference in the documented ERP minus settlement direction. */
-export function normalizeDifferenceDirection(result: CherryParseResult): CherryParseResult {
-  const issues = result.issues.map((issue) => {
-    const settlement = toNumber(issue.settlementValue ?? issue.settlementAmount);
-    const erp = toNumber(issue.erpValue ?? issue.erpAmount);
-    const reported = toNumber(issue.differenceAmount ?? issue.difference);
-    if (settlement === null || erp === null || reported === null) return issue;
-
-    const expected = Number((erp - settlement).toFixed(2));
-    if (Math.abs(Math.abs(expected) - Math.abs(reported)) > 0.01) return issue;
-    return {
-      ...issue,
-      differenceAmount: expected,
-      ...(issue.difference !== undefined ? { difference: expected } : {}),
-    };
-  });
-
-  const directionEvidence = issues.find((issue) => {
-    const issueDifference = toNumber(issue.differenceAmount ?? issue.difference);
-    return issueDifference !== null
-      && Math.abs(Math.abs(issueDifference) - Math.abs(result.difference)) <= 0.01;
-  });
-  const issueDifferences = issues
-    .map((issue) => toNumber(issue.differenceAmount ?? issue.difference))
-    .filter((difference): difference is number => difference !== null);
-  const summedDifference = issueDifferences.length === issues.length
-    ? Number(issueDifferences.reduce((sum, difference) => sum + difference, 0).toFixed(2))
-    : null;
-  const summedEvidence = summedDifference !== null
-    && Math.abs(Math.abs(summedDifference) - Math.abs(result.difference)) <= 0.01
-    ? summedDifference
-    : null;
-  const evidencedDifference = summedEvidence
-    ?? (directionEvidence ? toNumber(directionEvidence.differenceAmount ?? directionEvidence.difference) : null);
-  const difference = evidencedDifference === null
-    ? result.difference
-    : Math.sign(evidencedDifference) * Math.abs(result.difference);
-
-  return { ...result, difference, issues };
-}
-
 function finalizeAgentResult(result: CherryParseResult): CherryParseResult | null {
   const hasDifference = Math.abs(result.difference) > 0.005;
   if (result.matched) {
@@ -781,13 +724,4 @@ function finalizeAgentResult(result: CherryParseResult): CherryParseResult | nul
       suggestion: "核对 ERP 与结算资料中的金额汇总及逐笔明细",
     }],
   };
-}
-
-function toNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
 }
