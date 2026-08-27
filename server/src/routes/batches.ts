@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
@@ -22,7 +23,7 @@ import {
   isExcelFileName,
   readExcelSettlementDocuments,
 } from "../lib/excel-settlement.js";
-import { settlementFileHardRejectionReason } from "../lib/settlement-file-rules.js";
+import { settlementFileRejectionReason } from "../lib/settlement-file-rules.js";
 import {
   buildBatchExportCsv,
   createBatchDocument,
@@ -37,7 +38,7 @@ import {
   type BatchDocumentStatus,
   type BatchState,
 } from "../lib/batch-store.js";
-import { createReconciliationGroupTask, type ProgressLog } from "../services/reconciliation.js";
+import { createReconciliationTask, type ProgressLog } from "../services/reconciliation.js";
 
 export const batchesRouter = Router();
 
@@ -57,7 +58,7 @@ const excelMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
 ]);
-const readinessIssuePattern = /(文件名未识别到店铺号|未识别到 ERP 月份|未确认结算金额|ERP 明细匹配失败|飞书 ERP 明细表未找到|上传 ERP 文件未找到|候选不唯一|非 Excel 批量单据需要人工确认金额)/;
+const readinessIssuePattern = /(文件名未识别到店铺号|未识别到 ERP 月份|未确认结算金额|ERP 明细匹配失败|飞书 ERP 明细表未找到|上传 ERP 文件未找到|候选不唯一|执行时将按单文件流程)/;
 
 type UploadError = { code: string; message: string };
 
@@ -72,6 +73,18 @@ type BatchPrecheckContext = {
 
 function errorPayload(code: string, message: string) {
   return { error: { code, message, requestId: crypto.randomUUID() } };
+}
+
+function parseAgentSelector(body: unknown): { name: string; workspace?: string } | UploadError {
+  const payload = body as Record<string, unknown> | undefined;
+  const name = typeof payload?.agentName === "string" && payload.agentName.trim()
+    ? payload.agentName.trim()
+    : config.cherryStudio.defaultAgentName;
+  const workspace = typeof payload?.agentWorkspace === "string" && payload.agentWorkspace.trim()
+    ? payload.agentWorkspace.trim()
+    : config.cherryStudio.defaultAgentWorkspace;
+  if (!name) return { code: "AGENT_NAME_REQUIRED", message: "agentName 为必填字段" };
+  return { name, workspace: workspace || undefined };
 }
 
 batchesRouter.post("/", upload.fields([
@@ -218,81 +231,60 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
   try {
     const state = readBatchState(req.params.id);
     if (!state) return res.status(404).json(errorPayload("BATCH_NOT_FOUND", "未找到批量对账批次"));
+    const agentSelector = parseAgentSelector(req.body);
+    if ("code" in agentSelector) {
+      return res.status(400).json(errorPayload(agentSelector.code, agentSelector.message));
+    }
+
     rebuildBatchGroups(state);
-    const readyGroups = state.groups.filter((group) => group.status === "READY");
-    if (!readyGroups.length) {
-      return res.status(409).json(errorPayload("BATCH_NOT_EXECUTABLE", "没有可执行的批量对账组，请先补全待处理单据"));
+    const executableDocuments = state.documents.filter(isExecutableDocument);
+    if (!executableDocuments.length) {
+      return res.status(409).json(errorPayload("BATCH_NOT_EXECUTABLE", "没有可执行的批量对账单据，请先补全店铺号或移除无效文件"));
     }
 
     const items: Array<{
       fileName: string;
-      groupId: string;
+      groupId: string | null;
       taskId: string | null;
       status: "PROCESSING" | "REJECTED" | "FAILED";
       error: UploadError | null;
       logs: ProgressLog[];
     }> = [];
 
-    for (const group of readyGroups) {
-      const documents = group.documentIds.map((id) => state.documents.find((document) => document.id === id)).filter(isDocument);
-      const executableDocuments = documents.filter((document) => (
-        document.status === "READY"
-        && document.shopNo
-        && document.period
-        && document.confirmedSettlementAmount !== null
-        && document.confirmedSettlementLabel
-      ));
-      if (executableDocuments.length !== documents.length) {
-        items.push({
-          fileName: `${group.shopNo} ${group.period}`,
-          groupId: group.id,
-          taskId: null,
-          status: "REJECTED",
-          error: { code: "GROUP_NOT_READY", message: "该组仍有单据未确认" },
-          logs: [],
-        });
-        continue;
-      }
-
+    for (const document of executableDocuments) {
       const logs: ProgressLog[] = [];
       try {
-        const task = await createReconciliationGroupTask({
+        const task = await createReconciliationTask({
           batchId: state.id,
-          groupId: group.id,
-          shopNo: group.shopNo,
-          period: group.period,
-          erpFile: state.erpFile,
-          documents: executableDocuments.map((document) => ({
-            id: document.id,
-            file: document.file,
-            settlementAmount: document.confirmedSettlementAmount ?? 0,
-            settlementAmountLabel: document.confirmedSettlementLabel ?? "确认金额",
-          })),
+          settlementFile: toTaskUploadFile(document.file),
+          erpFile: state.erpFile ? toTaskUploadFile(state.erpFile) : undefined,
+          agentSelector,
+          settlementIdentity: document.shopNo ? {
+            shopNo: document.shopNo,
+            period: document.period ?? "",
+            documentLabel: document.fileName,
+          } : undefined,
           onProgress: (log) => logs.push(log),
           onSettled: async (result) => {
             const latest = readBatchState(state.id);
             if (!latest) return;
             const nextStatus = documentStatusFromTaskStatus(result.status);
-            for (const documentId of group.documentIds) {
-              const document = latest.documents.find((item) => item.id === documentId);
-              if (!document) continue;
-              document.status = nextStatus;
-              document.taskId = result.taskId;
-              document.updatedAt = new Date().toISOString();
-              if (result.message && nextStatus === "FAILED") document.issues = [...document.issues, result.message];
-            }
-            await syncBatchState(latest, group.documentIds);
+            const target = latest.documents.find((item) => item.id === document.id);
+            if (!target) return;
+            target.status = nextStatus;
+            target.taskId = result.taskId;
+            target.updatedAt = new Date().toISOString();
+            if (result.message && nextStatus === "FAILED") target.issues = [...target.issues, result.message];
+            await syncBatchState(latest, [target.id]);
           },
         });
-        for (const document of executableDocuments) {
-          document.status = "PROCESSING";
-          document.taskId = task.id;
-          document.updatedAt = new Date().toISOString();
-        }
-        await syncBatchState(state, executableDocuments.map((document) => document.id));
+        document.status = "PROCESSING";
+        document.taskId = task.id;
+        document.updatedAt = new Date().toISOString();
+        await syncBatchState(state, [document.id]);
         items.push({
-          fileName: `${group.shopNo} ${group.period}`,
-          groupId: group.id,
+          fileName: document.fileName,
+          groupId: document.groupId,
           taskId: task.id,
           status: task.status,
           error: null,
@@ -301,11 +293,11 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : "创建批量组任务失败";
         items.push({
-          fileName: `${group.shopNo} ${group.period}`,
-          groupId: group.id,
+          fileName: document.fileName,
+          groupId: document.groupId,
           taskId: null,
           status: "FAILED",
-          error: { code: "CREATE_GROUP_TASK_FAILED", message },
+          error: { code: "CREATE_BATCH_TASK_FAILED", message },
           logs,
         });
       }
@@ -361,46 +353,8 @@ async function precheckSettlementFile(
   let period = extractPeriodFromFileName(fileName);
   if (status !== "REJECTED" && isExcelFileName(fileName)) {
     const documents = await readExcelSettlementDocuments(stored.absolutePath, stored.originalName);
-    if (shopCodes.length > 1 && documents.length > 1) {
-      return Promise.all(documents.map((document, index) => precheckDocumentCandidate({
-        context,
-        file: stored,
-        fileName: `${document.name || `待识别单据${index + 1}`}（${fileName}）`,
-        sourceFileName: fileName,
-        sha256,
-        shopCodes: document.shopCodes,
-        period: document.period || period,
-        candidates: document.candidates,
-        documentNo: document.documentNo,
-        documentRange: `${document.sheetName} ${document.rowStart}-${document.rowEnd} 行`,
-        issues: [`已从 ${fileName} 自动拆出第 ${index + 1} 张结算单`],
-      })));
-    }
-
     const document = documents[0];
     period = document?.period || period;
-    if (shopCodes.length > 1) {
-      const erpPreview = period ? await describeMultiShopErpPreview(shopCodes, period, context) : "";
-      return Promise.all(shopCodes.map((shopCode, index) => completePrecheckDocument({
-        batchId: context.batchId,
-        file: stored,
-        fileName: `${shopCode}（${fileName}）`,
-        sourceFileName: fileName,
-        sha256,
-        shopCodes: [shopCode],
-        period,
-        documentNo: document?.documentNo ?? null,
-        documentRange: document ? `${document.sheetName} ${document.rowStart}-${document.rowEnd} 行` : null,
-        candidates: [],
-        status: "NEEDS_REVIEW",
-        issues: [
-          `已按文件名从 ${fileName} 拆出第 ${index + 1} 个店铺号 ${shopCode}`,
-          "未找到可靠的店铺级金额边界，请在单据视图为该店铺号手工确认金额",
-          erpPreview,
-        ].filter(Boolean),
-        context,
-      })));
-    }
     return [await completePrecheckDocument({
       batchId: context.batchId,
       file: stored,
@@ -422,8 +376,7 @@ async function precheckSettlementFile(
   }
 
   if (status !== "REJECTED" && status !== "DUPLICATE" && !isExcelFileName(fileName)) {
-    issues.push("非 Excel 批量单据需要人工确认金额；批量执行不会让 Agent 代选 PDF/图片金额");
-    status = "NEEDS_REVIEW";
+    issues.push("执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额");
   }
 
   return [await completePrecheckDocument({
@@ -441,50 +394,6 @@ async function precheckSettlementFile(
     issues,
     context,
   })];
-}
-
-async function precheckDocumentCandidate(params: {
-  context: BatchPrecheckContext;
-  file: ReturnType<typeof saveBatchUploadedFile>;
-  fileName: string;
-  sourceFileName: string;
-  sha256: string;
-  shopCodes: string[];
-  period: string | null;
-  candidates: ExcelSettlementCandidate[];
-  documentNo: string | null;
-  documentRange: string | null;
-  issues: string[];
-}) {
-  let status: BatchDocumentStatus = "READY";
-  const issues = [...params.issues];
-  if (params.shopCodes.length === 0) {
-    issues.push("拆分单据正文未识别到唯一店铺号");
-    status = "NEEDS_REVIEW";
-  } else if (params.shopCodes.length > 1) {
-    issues.push(`拆分单据仍包含多个店铺号（${params.shopCodes.join("、")}）`);
-    status = "NEEDS_REVIEW";
-  }
-  if (!params.period) {
-    issues.push("拆分单据未识别到 ERP 月份");
-    status = "NEEDS_REVIEW";
-  }
-
-  return completePrecheckDocument({
-    batchId: params.context.batchId,
-    file: params.file,
-    fileName: params.fileName,
-    sourceFileName: params.sourceFileName,
-    sha256: params.sha256,
-    shopCodes: params.shopCodes,
-    period: params.period,
-    documentNo: params.documentNo,
-    documentRange: params.documentRange,
-    candidates: params.candidates,
-    status,
-    issues,
-    context: params.context,
-  });
 }
 
 async function completePrecheckDocument(params: {
@@ -523,17 +432,16 @@ async function completePrecheckDocument(params: {
       status = "NEEDS_REVIEW";
     }
     if (!params.period) {
-      issues.push("未识别到 ERP 月份");
-      status = "NEEDS_REVIEW";
+      issues.push("未从文件名识别到账期，执行时将按单文件流程从结算单正文抽取");
     }
     if (isExcelFileName(params.fileName) && !chosen) {
-      issues.push(amountCandidates.length ? "结算金额候选不唯一，必须人工选择" : "Excel 中未识别到净营业额候选");
-      status = "NEEDS_REVIEW";
+      issues.push(amountCandidates.length
+        ? "Excel 本地金额候选不唯一，执行时将按单文件流程交给 Agent 识别"
+        : "Excel 中未识别到净营业额候选，执行时将按单文件流程交给 Agent 识别");
     }
   }
 
   const erpData = await tryResolveErpData(params.shopCodes, params.period, params.context, issues);
-  if (!erpData && status === "READY") status = "NEEDS_REVIEW";
 
   return createBatchDocument({
     batchId: params.batchId,
@@ -551,7 +459,7 @@ async function completePrecheckDocument(params: {
     confirmedSettlementLabel: chosen?.label ?? null,
     erpRows: erpData?.rows.length ?? null,
     erpSalesTotal: erpData?.salesTotal ?? null,
-    status: chosen && erpData && status === "READY" ? "READY" : status,
+    status,
     issues,
   });
 }
@@ -579,8 +487,6 @@ async function refreshDocumentReadiness(state: BatchState, document: BatchDocume
   document.issues = document.issues.filter((issue) => !readinessIssuePattern.test(issue));
   if (document.status === "REJECTED" || document.status === "DUPLICATE") return;
   if (!document.shopNo) document.issues.push("文件名未识别到店铺号");
-  if (!document.period) document.issues.push("未识别到 ERP 月份");
-  if (document.confirmedSettlementAmount === null) document.issues.push("未确认结算金额");
 
   if (document.shopNo && document.period) {
     const erpRows = state.erpFile ? await parseErpWorkbook(state.erpFile.absolutePath, state.erpFile.originalName).catch(() => null) : null;
@@ -592,25 +498,10 @@ async function refreshDocumentReadiness(state: BatchState, document: BatchDocume
     document.erpSalesTotal = erpData?.salesTotal ?? document.erpSalesTotal;
   }
 
-  document.status = document.shopNo && document.period && document.confirmedSettlementAmount !== null && document.erpSalesTotal !== null
+  document.status = document.shopNo
     ? "READY"
     : "NEEDS_REVIEW";
   document.updatedAt = new Date().toISOString();
-}
-
-async function describeMultiShopErpPreview(
-  shopCodes: string[],
-  period: string,
-  context: Pick<BatchPrecheckContext, "uploadedErpRows" | "uploadedErpError">,
-) {
-  const previews = await Promise.all(shopCodes.map(async (shopCode) => {
-    const issues: string[] = [];
-    const erpData = await tryResolveErpData([shopCode], period, context, issues);
-    return erpData
-      ? `${shopCode} 命中 ${erpData.rows.length} 行，ERP销售额 ${erpData.salesTotal.toFixed(2)} 元`
-      : `${shopCode} 未就绪：${issues.join("；") || "ERP 明细匹配失败"}`;
-  }));
-  return `拆分候选 ERP 检查：${previews.join("；")}`;
 }
 
 function toBatchCandidates(candidates: ExcelSettlementCandidate[]): BatchAmountCandidate[] {
@@ -636,7 +527,7 @@ function validateSettlementUpload(file: Express.Multer.File): UploadError | null
     || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !settlementMimeTypes.has(file.mimetype))) {
     return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF、PNG 和 JPG 文件" };
   }
-  const rejectedReason = settlementFileHardRejectionReason(file.originalname);
+  const rejectedReason = settlementFileRejectionReason(file.originalname);
   if (rejectedReason) return { code: "NOT_SETTLEMENT_FILE", message: rejectedReason };
   return null;
 }
@@ -650,8 +541,18 @@ function validateErpUpload(file: Express.Multer.File | undefined): UploadError |
   return null;
 }
 
-function isDocument(document: BatchDocumentState | undefined): document is BatchDocumentState {
-  return Boolean(document);
+function isExecutableDocument(document: BatchDocumentState) {
+  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(document.status)
+    && !document.taskId
+    && Boolean(document.shopNo);
+}
+
+function toTaskUploadFile(file: BatchDocumentState["file"]) {
+  return {
+    buffer: fs.readFileSync(file.absolutePath),
+    originalName: file.originalName,
+    contentType: file.contentType,
+  };
 }
 
 function documentStatusFromTaskStatus(status: string): BatchDocumentStatus {

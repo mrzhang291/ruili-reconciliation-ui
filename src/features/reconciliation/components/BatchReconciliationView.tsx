@@ -1,4 +1,4 @@
-// 文件说明：批量对账页面，负责批次预检、组级执行、人工确认和导出。
+// 文件说明：批量对账页面，负责批次预检、逐份执行、人工修正和导出。
 import { useEffect, useMemo, useState } from "react";
 import { reconciliationApi } from "../api";
 import { useStartReconciliation } from "../hooks/use-start-reconciliation";
@@ -48,6 +48,12 @@ function moneyText(value: number | null) {
   return value === null ? "—" : formatMoney({ currency: "CNY", value: String(value) });
 }
 
+function isRunnableBatchItem(item: BatchPrecheckItem) {
+  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(item.status)
+    && !item.taskId
+    && Boolean(item.shopNo);
+}
+
 function documentDraft(item: BatchPrecheckItem, drafts: Record<string, ManualDraft>) {
   return drafts[item.documentId] ?? {
     shopNo: item.shopNo ?? item.shopCodes[0] ?? "",
@@ -61,7 +67,11 @@ export function BatchReconciliationView() {
     batchFiles,
     batchRejectedFiles,
     taskErpFile,
+    agentName,
+    agentWorkspace,
     formError,
+    setAgentName,
+    setAgentWorkspace,
     clearTaskErpFile,
     clearBatchFiles,
     handleBatchFilesChange,
@@ -95,11 +105,12 @@ export function BatchReconciliationView() {
   const activePrecheckResult = precheckSignature === inputSignature ? precheckResult : null;
   const activePrecheckError = precheckErrorSignature === inputSignature ? precheckError : "";
   const filesReady = batchFiles.length > 0;
+  const hasAgentName = Boolean(agentName.trim());
   const canPrecheck = filesReady && !prechecking;
-  const canExecute = Boolean(activePrecheckResult?.executableGroups) && !prechecking && !savingDocumentId;
+  const canExecute = Boolean(activePrecheckResult?.executableFiles) && hasAgentName && !prechecking && !savingDocumentId;
   const canStart = activePrecheckResult ? canExecute : canPrecheck;
   const filePreview = batchFiles.slice(0, 10);
-  const pendingPrecheckCount = activePrecheckResult?.items.filter((item) => item.status === "NEEDS_REVIEW").length ?? 0;
+  const pendingPrecheckCount = activePrecheckResult?.items.filter((item) => item.status === "NEEDS_REVIEW" && !item.taskId && !isRunnableBatchItem(item)).length ?? 0;
   const totalSize = batchFiles.reduce((sum, file) => sum + file.size, 0);
 
   useEffect(() => {
@@ -220,7 +231,7 @@ export function BatchReconciliationView() {
       setPrecheckErrorSignature(inputSignature);
       return;
     }
-    void startBatchReconciliation({ batchId: activePrecheckResult.batchId });
+    void startBatchReconciliation({ batchId: activePrecheckResult.batchId, agentName, agentWorkspace });
   };
 
   return (
@@ -229,24 +240,57 @@ export function BatchReconciliationView() {
         <div>
           <span className="eyebrow">BATCH RECONCILIATION</span>
           <h1>批量对账</h1>
-          <p>选择结算单文件夹，系统落批次、拆单据、生成对账组，再按组执行。</p>
+          <p>一次选择多份结算单，系统落批次后逐份走单文件对账链路。</p>
         </div>
         <div className="security-note">
           <span aria-hidden="true">↗</span>
           <div>
-            <strong>组级批处理</strong>
+            <strong>逐份创建对账任务</strong>
             <small>单批最多 {batchReconciliationMaxFiles} 份，合计不超过 {batchReconciliationMaxTotalSizeMb} MB</small>
           </div>
         </div>
       </div>
 
       <div className="flow-strip" aria-label="批量对账步骤">
-        <div className="flow-item flow-item--active"><b>01</b><span>选择文件夹</span></div>
+        <div className="flow-item flow-item--active"><b>01</b><span>选择多个文件</span></div>
         <i />
         <div className={filesReady ? "flow-item flow-item--active" : "flow-item"}><b>02</b><span>预检建批次</span></div>
         <i />
-        <div className={activePrecheckResult ? "flow-item flow-item--active" : "flow-item"}><b>03</b><span>组级执行</span></div>
+        <div className={activePrecheckResult ? "flow-item flow-item--active" : "flow-item"}><b>03</b><span>逐份执行</span></div>
       </div>
+
+      <section className="agent-selector" aria-labelledby="batch-agent-selector-title">
+        <div className="agent-selector__intro">
+          <span>CHERRYSTUDIO TARGET</span>
+          <div>
+            <h2 id="batch-agent-selector-title">选择对账 Agent</h2>
+            <p>批量中的每份结算单都会使用同一个 Agent，默认使用锐力。</p>
+          </div>
+        </div>
+        <div className="agent-selector__fields">
+          <label>
+            <span>Agent 名称（必填）</span>
+            <input
+              type="text"
+              value={agentName}
+              onChange={(event) => setAgentName(event.target.value)}
+              placeholder="请输入 CherryStudio Agent 名称"
+              required
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>Agent 工作目录</span>
+            <input
+              type="text"
+              value={agentWorkspace}
+              onChange={(event) => setAgentWorkspace(event.target.value)}
+              placeholder="可选，用于消除同名 Agent 歧义"
+              autoComplete="off"
+            />
+          </label>
+        </div>
+      </section>
 
       <div className="file-grid">
         <section className={`file-card ${filesReady ? "file-card--ready" : ""}`} aria-labelledby="batch-upload-title">
@@ -254,18 +298,17 @@ export function BatchReconciliationView() {
             <span className="step-index">01</span>
             <span className="file-state">{filesReady ? "已就绪" : "等待导入"}</span>
           </div>
-          <div className="file-icon" aria-hidden="true">{filesReady ? batchFiles.length : "DIR"}</div>
-          <h3 id="batch-upload-title">批量结算单文件夹</h3>
-          <p>盘点、统计、扣款和租赁文件会过滤；多店铺号 Excel 会尝试拆分。</p>
+          <div className="file-icon" aria-hidden="true">{filesReady ? batchFiles.length : "FILES"}</div>
+          <h3 id="batch-upload-title">批量结算单文件</h3>
+          <p>可一次多选 PDF、Excel 或图片；盘点、统计、扣款和租赁文件会过滤。</p>
           <div className="file-actions">
             <label className="outline-button batch-picker">
-              <span aria-hidden="true">＋</span> {filesReady ? "更换文件夹" : "选择文件夹"}
+              <span aria-hidden="true">＋</span> {filesReady ? "更换文件" : "选择多个文件"}
               <input
                 type="file"
                 accept={reconciliationFileAccept}
                 multiple
                 onChange={handleBatchFilesChange}
-                {...({ directory: "", webkitdirectory: "" } as Record<string, string>)}
               />
             </label>
             {filesReady && <button type="button" className="text-button" onClick={clearBatchFiles}>清空批量</button>}
@@ -306,7 +349,7 @@ export function BatchReconciliationView() {
             <span>BATCH</span>
             <div>
               <h2>批次工作台</h2>
-              <p>预检会写入批处理汇总表和批量结算单明细表；执行只处理可执行组。</p>
+              <p>预检会写入批处理汇总表和批量结算单明细表；执行时逐份创建普通对账任务。</p>
             </div>
           </div>
           <div className="batch-panel__actions">
@@ -337,8 +380,8 @@ export function BatchReconciliationView() {
           {activePrecheckResult && (
             <div className="batch-precheck">
               <div className="batch-precheck__summary">
-                <span>可执行组 {activePrecheckResult.executableGroups}</span>
                 <span>可执行单据 {activePrecheckResult.executableFiles}</span>
+                <span>对账组 {activePrecheckResult.groups.length}</span>
                 <span>待确认 {pendingPrecheckCount}</span>
                 <span>拒绝 {activePrecheckResult.rejectedFiles}</span>
                 <span>去重 {activePrecheckResult.duplicateFiles}</span>
@@ -458,12 +501,12 @@ export function BatchReconciliationView() {
           <div>
             <strong>
               {activePrecheckResult
-                ? (canExecute ? `预检通过 ${activePrecheckResult.executableGroups} 个组，可确认执行` : "没有可执行组")
-                : filesReady ? `已选择 ${batchFiles.length} 份，等待预检` : "请先选择结算单文件夹"}
+                ? (canExecute ? `预检通过 ${activePrecheckResult.executableFiles} 份，可确认执行` : hasAgentName ? "没有可执行单据" : "请填写 Agent 名称")
+                : filesReady ? `已选择 ${batchFiles.length} 份，等待预检` : "请先选择结算单文件"}
             </strong>
             <small>
               {activePrecheckResult
-                ? (pendingPrecheckCount ? `${pendingPrecheckCount} 份需要补店铺号、账期或金额` : "执行后按组创建对账任务")
+                ? (pendingPrecheckCount ? `${pendingPrecheckCount} 份需要补店铺号` : "执行后逐份创建对账任务")
                 : filesReady ? "预检阶段会创建批次记录，不会调用 Agent" : "ERP 金额将由后端确定性计算"}
             </small>
           </div>
@@ -474,7 +517,7 @@ export function BatchReconciliationView() {
           </button>
         ) : (
           <button type="button" className="primary-button" disabled={!canStart} onClick={handleSubmit}>
-            {prechecking ? <><i className="spinner" aria-hidden="true" />正在预检</> : activePrecheckResult ? <>确认执行 {activePrecheckResult.executableGroups} 个组<span>→</span></> : <>开始预检<span>→</span></>}
+            {prechecking ? <><i className="spinner" aria-hidden="true" />正在预检</> : activePrecheckResult ? <>确认执行 {activePrecheckResult.executableFiles} 份<span>→</span></> : <>开始预检<span>→</span></>}
           </button>
         )}
       </section>

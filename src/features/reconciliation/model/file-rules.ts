@@ -156,7 +156,7 @@ export function validateBatchReconciliationFile(file: UploadFileLike) {
     return `单个文件不能超过 ${reconciliationMaxFileSizeMb} MB`;
   }
 
-  return settlementFileHardRejectionReason(file.name);
+  return settlementFileRejectionReason(file.name);
 }
 
 export function validateErpFile(file: UploadFileLike) {

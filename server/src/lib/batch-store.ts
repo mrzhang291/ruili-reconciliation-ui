@@ -385,6 +385,12 @@ function countDocuments(state: BatchState) {
   };
 }
 
+function isExecutableDocument(document: BatchDocumentState) {
+  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(document.status)
+    && !document.taskId
+    && Boolean(document.shopNo);
+}
+
 function batchRecordValues(state: BatchState) {
   const counts = countDocuments(state);
   return {
@@ -618,7 +624,7 @@ export function toBatchApi(state: BatchState) {
     totalFiles: state.totalFiles,
     totalSize: state.totalSize,
     validFiles: counts.valid,
-    executableFiles: state.documents.filter((document) => document.status === "READY").length,
+    executableFiles: state.documents.filter(isExecutableDocument).length,
     executableGroups: counts.readyGroups,
     rejectedFiles: state.documents.filter((document) => document.status === "REJECTED").length,
     duplicateFiles: state.documents.filter((document) => document.status === "DUPLICATE").length,

@@ -16,6 +16,8 @@ export type StartReconciliationInput = {
 
 export type StartBatchReconciliationInput = {
   batchId: string;
+  agentName: string;
+  agentWorkspace: string;
 };
 
 type ReconciliationTaskContextValue = {
@@ -240,6 +242,11 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
       setError("请先完成批量预检");
       return;
     }
+    const agentName = input.agentName.trim();
+    if (!agentName) {
+      setError("请填写 Agent 名称");
+      return;
+    }
 
     setRunning(true);
     setError("");
@@ -249,6 +256,10 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
     try {
       const result = await reconciliationApi.createBatchTasks({
         batchId: input.batchId,
+        agentSelector: {
+          name: agentName,
+          workspace: input.agentWorkspace.trim() || undefined,
+        },
         onProgress: (log) => upsertServerLogs([log]),
       });
       const createdItems = result.items.filter((item): item is typeof item & { taskId: string } => Boolean(item.taskId));

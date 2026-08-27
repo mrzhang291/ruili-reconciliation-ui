@@ -393,18 +393,27 @@ export class HttpReconciliationApi implements ReconciliationApi {
     if (!input.batchId) {
       throw new ReconciliationApiError("缺少批处理 ID", "BATCH_ID_REQUIRED", undefined, 400);
     }
+    const agentName = input.agentSelector.name.trim();
+    if (!agentName) {
+      throw new ReconciliationApiError("请填写 Agent 名称", "AGENT_NAME_REQUIRED", undefined, 400);
+    }
 
     input.onProgress?.({
       id: `local:${crypto.randomUUID()}`,
       timestamp: new Date().toISOString(),
       level: "info",
-      message: `正在执行批处理 ${input.batchId} 的可执行组…`,
+      message: `正在执行批处理 ${input.batchId} 的可执行单据…`,
     });
 
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/api/batches/${encodeURIComponent(input.batchId)}/execute`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentName,
+          agentWorkspace: input.agentSelector.workspace ?? "",
+        }),
       });
     } catch {
       throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");

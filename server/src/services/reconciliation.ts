@@ -54,27 +54,13 @@ export type CreateReconciliationInput = {
   settlementFile: { buffer: Buffer; originalName: string; contentType: string };
   erpFile?: { buffer: Buffer; originalName: string; contentType: string };
   agentSelector: AgentSelector & { name: string };
+  batchId?: string;
   settlementIdentity?: {
     shopNo: string;
     period: string;
     candidate?: ExcelSettlementCandidate;
     documentLabel?: string;
   };
-  onProgress?: (log: ProgressLog) => void;
-};
-
-export type CreateReconciliationGroupInput = {
-  batchId: string;
-  groupId: string;
-  shopNo: string;
-  period: string;
-  documents: Array<{
-    id: string;
-    file: StoredFile;
-    settlementAmount: number;
-    settlementAmountLabel: string;
-  }>;
-  erpFile?: StoredFile | null;
   onProgress?: (log: ProgressLog) => void;
   onSettled?: (result: { taskId: string; status: string; message: string | null }) => void | Promise<void>;
 };
@@ -148,7 +134,7 @@ export async function createReconciliationTask(input: CreateReconciliationInput)
   emit(onProgress, "info", "开始创建飞书对账任务…");
 
   const files = saveTaskFiles(input);
-  const batchId = crypto.randomUUID();
+  const batchId = input.batchId ?? crypto.randomUUID();
   try {
     taskId = await createTaskRecord({
       name: input.settlementIdentity?.documentLabel ?? files.settlement.originalName,
@@ -163,30 +149,7 @@ export async function createReconciliationTask(input: CreateReconciliationInput)
   initializeTaskProgress(taskId, pendingLogs);
   emit(onProgress, "success", `飞书任务已创建（记录 ID：${taskId}）`);
   emit(onProgress, "info", `任务已进入执行队列，最多同时处理 ${maxConcurrentReconciliations} 份结算资料`);
-  scheduleReconciliation(() => runReconciliation(taskId, batchId, files, input.agentSelector, onProgress));
-  return { id: taskId, status: "PROCESSING" as const };
-}
-
-export async function createReconciliationGroupTask(input: CreateReconciliationGroupInput) {
-  const firstDocument = input.documents[0];
-  if (!firstDocument) throw new Error("批量组没有可执行单据");
-  let taskId: string | null = null;
-  const pendingLogs: ProgressLog[] = [];
-  const onProgress = (log: ProgressLog) => {
-    if (taskId) appendTaskProgress(taskId, log);
-    else pendingLogs.push(log);
-    input.onProgress?.(log);
-  };
-
-  emit(onProgress, "info", `开始创建批量组任务 ${input.groupId}…`);
-  taskId = await createTaskRecord({
-    name: `${input.shopNo} ${input.period} 批量组`,
-    batchId: input.batchId,
-  });
-  initializeTaskProgress(taskId, pendingLogs);
-  emit(onProgress, "success", `飞书组任务已创建（记录 ID：${taskId}）`);
-  emit(onProgress, "info", `组任务已进入执行队列，最多同时处理 ${maxConcurrentReconciliations} 个任务`);
-  scheduleReconciliation(() => runDeterministicGroupReconciliation(taskId, input, onProgress));
+  scheduleReconciliation(() => runReconciliation(taskId, batchId, files, input.agentSelector, onProgress, input.onSettled));
   return { id: taskId, status: "PROCESSING" as const };
 }
 
@@ -196,10 +159,21 @@ async function runReconciliation(
   files: ActiveReconciliation["files"],
   agentSelector: AgentSelector,
   onProgress?: CreateReconciliationInput["onProgress"],
+  onSettled?: CreateReconciliationInput["onSettled"],
 ) {
   const active: ActiveReconciliation = { controller: new AbortController(), batchId, files };
   activeReconciliations.set(taskId, active);
   let taskWorkDir = "";
+  let settled = false;
+  const settle = async (status: string, message: string | null) => {
+    if (settled) return;
+    settled = true;
+    try {
+      await onSettled?.({ taskId, status, message });
+    } catch (error) {
+      console.error(`[reconciliation] 同步任务 ${taskId} 完成状态失败`, error);
+    }
+  };
 
   try {
     taskWorkDir = prepareTaskWorkDir(taskId);
@@ -279,16 +253,23 @@ async function runReconciliation(
     const finalResult = buildReconciliationResult(result, erpData);
     const applied = await applyTaskResult(taskId, batchId, finalResult, knowledge.ruleVersions);
     if (applied) emit(onProgress, "success", `对账完成：${finalResult.name}，权威差额 ${finalResult.difference.toFixed(2)} 元`);
+    const completed = await getTaskRecord(taskId);
+    await settle(completed?.status ?? "FAILED", completed?.failureReason ?? null);
   } catch (error) {
-    if (active.controller.signal.aborted || (await getTaskRecord(taskId))?.status === "CANCELLED") return;
+    if (active.controller.signal.aborted || (await getTaskRecord(taskId))?.status === "CANCELLED") {
+      await settle("CANCELLED", "对账任务已由用户停止");
+      return;
+    }
     const message = error instanceof Error ? error.message : "对账处理失败";
     const code = error instanceof CherryStudioError || error instanceof LarkKnowledgeError || error instanceof ErpBaseQueryError || error instanceof ErpImportError ? error.code : "RECONCILIATION_FAILED";
     emit(onProgress, "error", message);
+    const failureMessage = `${code}: ${message}`;
     try {
-      await failTaskRecord(taskId, batchId, `${code}: ${message}`);
+      await failTaskRecord(taskId, batchId, failureMessage);
     } catch {
       // 飞书不可用时无法回写失败状态，保留原始错误日志。
     }
+    await settle("FAILED", failureMessage);
   } finally {
     try {
       cleanupTaskWorkDir(taskId);
@@ -296,118 +277,6 @@ async function runReconciliation(
       if (files.erp) deleteStoredFilePath(files.erp.absolutePath);
     } catch (error) {
       console.error(`[cleanup] 清理任务临时文件 ${taskId} 失败`, error);
-    }
-    if (activeReconciliations.get(taskId) === active) activeReconciliations.delete(taskId);
-  }
-}
-
-async function runDeterministicGroupReconciliation(
-  taskId: string,
-  input: CreateReconciliationGroupInput,
-  onProgress?: CreateReconciliationInput["onProgress"],
-) {
-  const firstDocument = input.documents[0];
-  const active: ActiveReconciliation = {
-    controller: new AbortController(),
-    batchId: input.batchId,
-    files: { settlement: firstDocument.file, erp: input.erpFile ?? undefined },
-  };
-  activeReconciliations.set(taskId, active);
-  let taskWorkDir = "";
-  let settled = false;
-
-  const settle = async (status: string, message: string | null) => {
-    if (settled) return;
-    settled = true;
-    try {
-      await input.onSettled?.({ taskId, status, message });
-    } catch (error) {
-      console.error(`[batch] 同步批量组 ${input.groupId} 状态失败`, error);
-    }
-  };
-
-  try {
-    taskWorkDir = prepareTaskWorkDir(taskId);
-    emit(onProgress, "info", `正在保存批量组 ${input.groupId} 的首份结算原始文件到飞书…`);
-    await uploadTaskAttachment(taskId, "结算文件", firstDocument.file.absolutePath);
-    emit(onProgress, "success", "结算原始文件已保存到飞书；完整源文件保留在批量明细表");
-    if (input.erpFile) {
-      emit(onProgress, "info", "正在把本批次 ERP 文件保存到飞书附件字段…");
-      await uploadTaskAttachment(taskId, "ERP文件", input.erpFile.absolutePath);
-      emit(onProgress, "success", "本批次 ERP 文件已保存到飞书");
-    }
-
-    const current = await getTaskRecord(taskId);
-    if (!current || current.status !== "PROCESSING" || current.batchId !== input.batchId) return;
-
-    emit(onProgress, "info", "正在从飞书知识规则表读取本次规则…");
-    const knowledge = await loadKnowledgeInstructions(input.shopNo);
-    emit(onProgress, "success", `已加载 ${knowledge.ruleVersions.length} 条飞书知识规则`);
-
-    const settlementAmount = input.documents.reduce((sum, document) => sum + document.settlementAmount, 0);
-    const settlementLabel = input.documents.length === 1
-      ? input.documents[0].settlementAmountLabel
-      : `批量组确认金额合计（${input.documents.length} 份单据）`;
-    emit(onProgress, "success", `已采用批量明细确认金额 ${settlementAmount.toFixed(2)} 元，不让 Agent 重新判断金额`);
-
-    const erpData = await resolveErpData(
-      { settlement: firstDocument.file, erp: input.erpFile ?? undefined, settlementIdentity: { shopNo: input.shopNo, period: input.period } },
-      [input.shopNo],
-      input.period,
-      onProgress,
-    );
-    emit(onProgress, "success", `已按店铺号 ${erpData.lookupKey} 读取 ${erpData.rows.length} 行 ERP 明细，扣点前 ${erpData.salesTotal.toFixed(2)} 元，扣点后 ${erpData.netSalesTotal.toFixed(2)} 元`);
-
-    const finalResult = buildReconciliationResult({
-      name: input.shopNo,
-      period: input.period,
-      settlementAmount,
-      settlementAmountLabel: settlementLabel,
-      issues: [],
-      rawAgentPayload: {
-        settlementAmount,
-        settlementAmountLabel: settlementLabel,
-        issues: "",
-        period: input.period,
-        name: input.shopNo,
-      },
-    }, erpData);
-    finalResult.rawAgentPayload = {
-      ...finalResult.rawAgentPayload,
-      extractionMode: "deterministic_batch_group",
-      batchId: input.batchId,
-      groupId: input.groupId,
-      documents: input.documents.map((document) => ({
-        id: document.id,
-        fileName: document.file.originalName,
-        settlementAmount: document.settlementAmount,
-        settlementAmountLabel: document.settlementAmountLabel,
-      })),
-    };
-
-    const applied = await applyTaskResult(taskId, input.batchId, finalResult, knowledge.ruleVersions);
-    const completed = await getTaskRecord(taskId);
-    if (applied) emit(onProgress, "success", `批量组对账完成：${finalResult.name}，权威差额 ${finalResult.difference.toFixed(2)} 元`);
-    await settle(completed?.status ?? "FAILED", completed?.failureReason ?? null);
-  } catch (error) {
-    if (active.controller.signal.aborted || (await getTaskRecord(taskId))?.status === "CANCELLED") {
-      await settle("CANCELLED", "对账任务已由用户停止");
-      return;
-    }
-    const message = error instanceof Error ? error.message : "批量组对账处理失败";
-    const code = error instanceof LarkKnowledgeError || error instanceof ErpBaseQueryError || error instanceof ErpImportError ? error.code : "BATCH_GROUP_RECONCILIATION_FAILED";
-    emit(onProgress, "error", message);
-    try {
-      await failTaskRecord(taskId, input.batchId, `${code}: ${message}`);
-    } catch {
-      // 飞书不可用时无法回写失败状态，保留原始错误日志。
-    }
-    await settle("FAILED", `${code}: ${message}`);
-  } finally {
-    try {
-      if (taskWorkDir) cleanupTaskWorkDir(taskId);
-    } catch (error) {
-      console.error(`[cleanup] 清理批量组临时目录 ${taskId} 失败`, error);
     }
     if (activeReconciliations.get(taskId) === active) activeReconciliations.delete(taskId);
   }

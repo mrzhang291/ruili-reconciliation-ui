@@ -114,6 +114,10 @@ export type CreateReconciliationTaskInput = {
 
 export type CreateBatchReconciliationTasksInput = {
   batchId: string;
+  agentSelector: {
+    name: string;
+    workspace?: string;
+  };
   onProgress?: ReconciliationProgressListener;
 };
 
