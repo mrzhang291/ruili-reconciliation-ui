@@ -35,6 +35,11 @@ type HttpConfig = {
 };
 
 const startupRetryDelaysMs = [250, 500, 1_000, 1_500, 2_000];
+const clientTaskListCacheTtlMs = 10_000;
+const clientReviewListCacheTtlMs = 20_000;
+const clientStatisticsCacheTtlMs = 30_000;
+const clientErpListCacheTtlMs = 90_000;
+const clientErpOptionsCacheTtlMs = 5 * 60_000;
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -221,9 +226,39 @@ function toReviewRow(raw: RawReviewListRow): ReconciliationReviewRow {
 
 export class HttpReconciliationApi implements ReconciliationApi {
   private readonly baseUrl: string;
+  private readonly readCache = new Map<string, { expiresAt: number; value: unknown }>();
+  private readonly inflightReads = new Map<string, Promise<unknown>>();
 
   constructor(config: HttpConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
+  }
+
+  private async cached<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+    const hit = this.readCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.value as T;
+
+    const pending = this.inflightReads.get(key);
+    if (pending) return pending as Promise<T>;
+
+    const request = loader().then((value) => {
+      this.readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      return value;
+    }).finally(() => {
+      this.inflightReads.delete(key);
+    });
+    this.inflightReads.set(key, request);
+    return request;
+  }
+
+  private invalidateCache(prefixes?: string | string[]) {
+    if (!prefixes) {
+      this.readCache.clear();
+      return;
+    }
+    const list = Array.isArray(prefixes) ? prefixes : [prefixes];
+    for (const key of this.readCache.keys()) {
+      if (list.some((prefix) => key.startsWith(prefix))) this.readCache.delete(key);
+    }
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -349,6 +384,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
         response.status,
       );
     }
+    this.invalidateCache(["tasks:", "stats:", "reviews:"]);
 
     // 需要返回 ReconciliationTaskSummary，但异步对账还没完成。
     // 这里返回一个 PROCESSING 的占位摘要，后续靠轮询 getTask 获取真实状态。
@@ -498,6 +534,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
     if (!envelope?.data) {
       throw new ReconciliationApiError("后端已响应，但没有返回批量任务结果", "INVALID_CREATE_BATCH_TASKS_RESPONSE");
     }
+    this.invalidateCache(["tasks:", "stats:", "reviews:"]);
 
     for (const item of envelope.data.items) {
       for (const log of item.logs ?? []) {
@@ -558,38 +595,47 @@ export class HttpReconciliationApi implements ReconciliationApi {
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return this.request<PaginatedErpRecords>(`/api/erp?${query.toString()}`);
+    const key = `erp:list:${query.toString()}`;
+    return this.cached(key, clientErpListCacheTtlMs, () => this.request<PaginatedErpRecords>(`/api/erp?${query.toString()}`));
   }
 
   async getErpFilterOptions(): Promise<ErpFilterOptions> {
-    return this.request<ErpFilterOptions>("/api/erp/options");
+    return this.cached("erp:options", clientErpOptionsCacheTtlMs, () => this.request<ErpFilterOptions>("/api/erp/options"));
   }
 
   async createErpRecord(input: ErpRecordInput): Promise<ErpRecord> {
-    return this.request<ErpRecord>("/api/erp", {
+    const record = await this.request<ErpRecord>("/api/erp", {
       method: "POST",
       body: JSON.stringify(input),
     });
+    this.invalidateCache("erp:");
+    return record;
   }
 
   async updateErpRecord(recordId: string, input: ErpRecordInput): Promise<ErpRecord> {
-    return this.request<ErpRecord>(`/api/erp/${encodeURIComponent(recordId)}`, {
+    const record = await this.request<ErpRecord>(`/api/erp/${encodeURIComponent(recordId)}`, {
       method: "PATCH",
       body: JSON.stringify(input),
     });
+    this.invalidateCache("erp:");
+    return record;
   }
 
   async batchUpdateErpRecords(input: BatchUpdateErpRecordsInput): Promise<BatchUpdateErpRecordsResult> {
-    return this.request<BatchUpdateErpRecordsResult>("/api/erp/batch-update", {
+    const result = await this.request<BatchUpdateErpRecordsResult>("/api/erp/batch-update", {
       method: "POST",
       body: JSON.stringify({ items: input }),
     });
+    this.invalidateCache("erp:");
+    return result;
   }
 
   async deleteErpRecord(recordId: string): Promise<{ deleted: boolean; record: ErpRecord }> {
-    return this.request<{ deleted: boolean; record: ErpRecord }>(`/api/erp/${encodeURIComponent(recordId)}`, {
+    const result = await this.request<{ deleted: boolean; record: ErpRecord }>(`/api/erp/${encodeURIComponent(recordId)}`, {
       method: "DELETE",
     });
+    this.invalidateCache("erp:");
+    return result;
   }
 
   async importErpFile(input: ImportErpFileInput): Promise<ErpImportResult> {
@@ -630,6 +676,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
     if (!envelope?.data) {
       throw new ReconciliationApiError("后端已响应，但没有返回 ERP 导入结果", "INVALID_ERP_IMPORT_RESPONSE");
     }
+    if (envelope.data.written) this.invalidateCache("erp:");
     return envelope.data;
   }
 
@@ -640,7 +687,11 @@ export class HttpReconciliationApi implements ReconciliationApi {
     if (params.page) query.set("page", String(params.page));
     if (params.pageSize) query.set("pageSize", String(params.pageSize));
 
-    const raw = await this.request<RawListResponse>(`/api/tasks?${query.toString()}`);
+    const raw = await this.cached(
+      `tasks:list:${query.toString()}`,
+      clientTaskListCacheTtlMs,
+      () => this.request<RawListResponse>(`/api/tasks?${query.toString()}`),
+    );
 
     const byStatus = {} as Record<ReconciliationStatus, number>;
     const statuses: ReconciliationStatus[] = ["QUEUED", "PROCESSING", "SUCCEEDED", "NEEDS_REVIEW", "REVIEWED", "FAILED", "CANCELLED", "OBSOLETE"];
@@ -656,23 +707,29 @@ export class HttpReconciliationApi implements ReconciliationApi {
   }
 
   async listReviewItems(): Promise<ReconciliationReviewRow[]> {
-    const rows: ReconciliationReviewRow[] = [];
-    for (let page = 1; ; page += 1) {
-      const query = new URLSearchParams({
-        page: String(page),
-        pageSize: "200",
-        status: "PENDING,APPROVED,IGNORED",
-      });
-      const raw = await this.request<RawReviewListResponse>(`/api/tasks/review-items?${query.toString()}`);
-      rows.push(...raw.items.map(toReviewRow));
-      if (!raw.hasMore) break;
-    }
-    return rows;
+    return this.cached("reviews:list:all", clientReviewListCacheTtlMs, async () => {
+      const rows: ReconciliationReviewRow[] = [];
+      for (let page = 1; ; page += 1) {
+        const query = new URLSearchParams({
+          page: String(page),
+          pageSize: "200",
+          status: "PENDING,APPROVED,IGNORED",
+        });
+        const raw = await this.request<RawReviewListResponse>(`/api/tasks/review-items?${query.toString()}`);
+        rows.push(...raw.items.map(toReviewRow));
+        if (!raw.hasMore) break;
+      }
+      return rows;
+    });
   }
 
   async getTask(taskId: string): Promise<ReconciliationTaskDetail> {
     const raw = await this.request<RawDetail>(`/api/tasks/${encodeURIComponent(taskId)}`);
-    return toDetail(raw);
+    const task = toDetail(raw);
+    if (task.status !== "QUEUED" && task.status !== "PROCESSING") {
+      this.invalidateCache(["tasks:", "stats:", "reviews:"]);
+    }
+    return task;
   }
 
   async stopTask(taskId: string): Promise<void> {
@@ -680,6 +737,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
       `/api/tasks/${encodeURIComponent(taskId)}/stop`,
       { method: "POST" },
     );
+    this.invalidateCache(["tasks:", "stats:", "reviews:"]);
   }
 
   async deleteTask(taskId: string): Promise<void> {
@@ -687,6 +745,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
       `/api/tasks/${encodeURIComponent(taskId)}`,
       { method: "DELETE" },
     );
+    this.invalidateCache(["tasks:", "stats:", "reviews:"]);
   }
 
   async updateReviewItem(taskId: string, itemId: string, status: ReviewItemStatus) {
@@ -694,12 +753,17 @@ export class HttpReconciliationApi implements ReconciliationApi {
       `/api/tasks/${encodeURIComponent(taskId)}/review-items/${encodeURIComponent(itemId)}`,
       { method: "PATCH", body: JSON.stringify({ status }) },
     );
+    this.invalidateCache(["tasks:", "stats:", "reviews:"]);
     return toDetail(result.task);
   }
 
   async getStatistics(month?: string): Promise<ReconciliationStatistics> {
     const query = month ? `?month=${month}` : "";
-    const raw = await this.request<ReconciliationStatistics>(`/api/statistics${query}`);
+    const raw = await this.cached(
+      `stats:${month ?? "current"}`,
+      clientStatisticsCacheTtlMs,
+      () => this.request<ReconciliationStatistics>(`/api/statistics${query}`),
+    );
     return {
       ...raw,
       totalDifferenceAmount: money(raw.totalDifferenceAmount as unknown as string) ?? { currency: "CNY", value: "0" },

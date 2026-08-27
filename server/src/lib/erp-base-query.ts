@@ -1,9 +1,11 @@
 import { config } from "./config.js";
 import { LarkCliError, runLarkCli } from "./lark-cli.js";
+import { cacheKey, readThroughCache } from "./read-cache.js";
 import { rowsFromPage } from "./lark-store.js";
 import type { ReconciliationResult, SettlementExtractionResult } from "./cherrystudio.js";
 
 const fields = ["店铺号", "扣点", "销售额", "月份"] as const;
+const erpQueryCacheTtlMs = 60_000;
 
 type PageEnvelope = {
   ok?: boolean;
@@ -201,6 +203,13 @@ export function buildReconciliationResult(extraction: SettlementExtractionResult
 }
 
 export async function queryErpReconciliationData(lookupKey: string, period: string): Promise<ErpReconciliationData> {
+  return readThroughCache(cacheKey("erp:query", {
+    lookupKey: normalizeShopNo(lookupKey),
+    period,
+  }), erpQueryCacheTtlMs, () => queryErpReconciliationDataFresh(lookupKey, period));
+}
+
+async function queryErpReconciliationDataFresh(lookupKey: string, period: string): Promise<ErpReconciliationData> {
   const month = periodToMonthKey(period);
   const rows: ErpBaseRow[] = [];
   const limit = 200;

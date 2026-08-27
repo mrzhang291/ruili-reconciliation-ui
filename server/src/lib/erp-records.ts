@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { erpFields, erpUniqueKey, type ParsedErpImportRow } from "./erp-import.js";
 import { runLarkCli } from "./lark-cli.js";
 import { findCreatedRecordId, isLarkRecordId, rowsFromPage } from "./lark-store.js";
+import { cacheKey, invalidateReadCache, readThroughCache } from "./read-cache.js";
 
 type PageEnvelope = {
   ok?: boolean;
@@ -41,30 +42,41 @@ const sortFields: Record<ErpSortField, string> = {
   deductionRate: "扣点",
   salesAmount: "销售额",
 };
+const erpListCacheTtlMs = 90_000;
+const erpOptionsCacheTtlMs = 5 * 60_000;
+
+function invalidateErpReadCaches() {
+  invalidateReadCache("erp:");
+}
 
 export async function listErpRecords(params: ErpListParams) {
-  const rows = await readErpRows(params);
-  const total = rows.length;
-  const start = (params.page - 1) * params.pageSize;
-  return { items: rows.slice(start, start + params.pageSize), total, page: params.page, pageSize: params.pageSize };
+  return readThroughCache(cacheKey("erp:list", params), erpListCacheTtlMs, async () => {
+    const rows = await readErpRows(params);
+    const total = rows.length;
+    const start = (params.page - 1) * params.pageSize;
+    return { items: rows.slice(start, start + params.pageSize), total, page: params.page, pageSize: params.pageSize };
+  });
 }
 
 export async function getErpFilterOptions() {
-  const rows = await readErpRows({
-    page: 1,
-    pageSize: 200,
-    sortField: "month",
-    sortDirection: "desc",
+  return readThroughCache(cacheKey("erp:options"), erpOptionsCacheTtlMs, async () => {
+    const rows = await readErpRows({
+      page: 1,
+      pageSize: 200,
+      sortField: "month",
+      sortDirection: "desc",
+    });
+    return {
+      months: unique(rows.map((row) => row.month)).sort((a, b) => b.localeCompare(a)),
+    };
   });
-  return {
-    months: unique(rows.map((row) => row.month)).sort((a, b) => b.localeCompare(a)),
-  };
 }
 
 export async function createErpRecord(input: unknown) {
   const row = normalizeInput(input);
   await assertNoConflict(row);
   const payload = await recordUpsert(row);
+  invalidateErpReadCaches();
   const id = findCreatedRecordId(payload);
   if (!id) throw new ErpRecordError("飞书创建 ERP 明细后没有返回记录 ID", "ERP_RECORD_CREATE_FAILED");
   return await getErpRecord(id);
@@ -76,6 +88,7 @@ export async function updateErpRecord(recordId: string, input: unknown) {
   const row = normalizeInput(input);
   await assertNoConflict(row, recordId);
   await recordUpsert(row, recordId);
+  invalidateErpReadCaches();
   return await getErpRecord(recordId);
 }
 
@@ -105,6 +118,7 @@ export async function deleteErpRecord(recordId: string) {
     "--yes",
     "--as", "user",
   ]);
+  invalidateErpReadCaches();
   return record;
 }
 

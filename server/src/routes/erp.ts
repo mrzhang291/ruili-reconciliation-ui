@@ -5,6 +5,7 @@ import { Router } from "express";
 import multer from "multer";
 import { config } from "../lib/config.js";
 import { ErpImportError, importErpWorkbook, type ErpImportMode } from "../lib/erp-import.js";
+import { invalidateReadCache } from "../lib/read-cache.js";
 import {
   batchUpdateErpRecords,
   createErpRecord,
@@ -126,6 +127,7 @@ erpRouter.post("/import", upload.single("erpFile"), async (req, res, next) => {
       mode,
       month: typeof req.body?.month === "string" ? req.body.month.trim() || undefined : undefined,
     });
+    if (data.written) invalidateReadCache("erp:");
 
     return res.json({ data, requestId: crypto.randomUUID() });
   } catch (error) {

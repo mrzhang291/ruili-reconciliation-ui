@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { projectRoot, relativeCliPath, runLarkCli } from "./lark-cli.js";
+import { cacheKey, invalidateReadCache, readThroughCache } from "./read-cache.js";
 import type { CherryIssue, ReconciliationResult } from "./cherrystudio.js";
 
 const taskFields = [
@@ -26,6 +27,9 @@ const baseToApiStatus: Record<string, string> = {
 const apiToBaseStatus = Object.fromEntries(Object.entries(baseToApiStatus).map(([base, api]) => [api, base]));
 const baseToReviewStatus: Record<string, string> = { 待处理: "PENDING", 已通过: "APPROVED", 已忽略: "IGNORED" };
 const apiToReviewStatus = Object.fromEntries(Object.entries(baseToReviewStatus).map(([base, api]) => [api, base]));
+const taskListCacheTtlMs = 15_000;
+const reviewListCacheTtlMs = 20_000;
+const statisticsCacheTtlMs = 30_000;
 
 type PageEnvelope = {
   ok?: boolean;
@@ -212,6 +216,14 @@ export function formulaChecksReady(task: Pick<StoredTask, "differenceCheck" | "r
     && terminal.has(task.reasonablenessCheck ?? "");
 }
 
+function invalidateTaskReadCaches() {
+  invalidateReadCache(["tasks:", "stats:"]);
+}
+
+function invalidateReviewReadCaches() {
+  invalidateReadCache(["reviews:", "tasks:", "stats:"]);
+}
+
 async function recordUpsert(tableId: string, values: Record<string, unknown>, recordId?: string) {
   const args = ["base", "+record-upsert", "--base-token", config.lark.baseToken, "--table-id", tableId];
   if (recordId) args.push("--record-id", recordId);
@@ -225,16 +237,19 @@ async function recordUpsert(tableId: string, values: Record<string, unknown>, re
 
 export async function createTaskRecord(params: { name: string; batchId: string }) {
   const now = formatDateTime(new Date());
-  return recordUpsert(config.lark.taskTableId, {
+  const recordId = await recordUpsert(config.lark.taskTableId, {
     任务名称: params.name,
     状态: "处理中",
     处理批次ID: params.batchId,
     开始时间: now,
   });
+  invalidateTaskReadCaches();
+  return recordId;
 }
 
 export async function updateTaskRecord(recordId: string, values: Record<string, unknown>) {
   await recordUpsert(config.lark.taskTableId, values, recordId);
+  invalidateTaskReadCaches();
 }
 
 export async function uploadTaskAttachment(recordId: string, field: "结算文件" | "ERP文件", absolutePath: string) {
@@ -247,6 +262,7 @@ export async function uploadTaskAttachment(recordId: string, field: "结算文�
     "--file", relativeCliPath(absolutePath),
     "--as", "user",
   ]);
+  invalidateTaskReadCaches();
 }
 
 export async function getTaskRecord(recordId: string) {
@@ -280,12 +296,20 @@ async function reviewListPage(params: { offset: number; limit: number; statuses:
 }
 
 export async function listReviewRecords(params: { page: number; pageSize: number; statuses: string[]; taskId?: string }) {
-  const offset = (params.page - 1) * params.pageSize;
-  const page = await reviewListPage({ offset, limit: params.pageSize, statuses: params.statuses, taskId: params.taskId });
-  return {
-    items: rowsFromPage(page).map(reviewFromRow),
-    hasMore: Boolean(page.data?.has_more),
-  };
+  const key = cacheKey("reviews:list", {
+    page: params.page,
+    pageSize: params.pageSize,
+    statuses: [...params.statuses].sort(),
+    taskId: params.taskId ?? "",
+  });
+  return readThroughCache(key, reviewListCacheTtlMs, async () => {
+    const offset = (params.page - 1) * params.pageSize;
+    const page = await reviewListPage({ offset, limit: params.pageSize, statuses: params.statuses, taskId: params.taskId });
+    return {
+      items: rowsFromPage(page).map(reviewFromRow),
+      hasMore: Boolean(page.data?.has_more),
+    };
+  });
 }
 
 async function listTaskReviewRecords(task: StoredTask) {
@@ -349,30 +373,38 @@ async function statusCounts(statuses: string[] = []) {
 }
 
 export async function listTaskRecords(params: { page: number; pageSize: number; statuses: string[]; keyword?: string }) {
-  const offset = (params.page - 1) * params.pageSize;
-  if (!params.keyword) {
-    const [page, filteredCounts, facets] = await Promise.all([
-      listPage({ offset, limit: params.pageSize, statuses: params.statuses }),
-      statusCounts(params.statuses),
-      statusCounts(),
-    ]);
-    return {
-      items: rowsFromPage(page).map(taskFromRow),
-      total: Object.values(filteredCounts).reduce((sum, count) => sum + count, 0),
-      facets,
-    };
-  }
+  const key = cacheKey("tasks:list", {
+    page: params.page,
+    pageSize: params.pageSize,
+    statuses: [...params.statuses].sort(),
+    keyword: params.keyword ?? "",
+  });
+  return readThroughCache(key, taskListCacheTtlMs, async () => {
+    const offset = (params.page - 1) * params.pageSize;
+    if (!params.keyword) {
+      const [page, filteredCounts, facets] = await Promise.all([
+        listPage({ offset, limit: params.pageSize, statuses: params.statuses }),
+        statusCounts(params.statuses),
+        statusCounts(),
+      ]);
+      return {
+        items: rowsFromPage(page).map(taskFromRow),
+        total: Object.values(filteredCounts).reduce((sum, count) => sum + count, 0),
+        facets,
+      };
+    }
 
-  const matched: StoredTask[] = [];
-  for (let searchOffset = 0; ; searchOffset += 200) {
-    const page = await listPage({ offset: searchOffset, limit: 200, statuses: [], keyword: params.keyword });
-    matched.push(...rowsFromPage(page).map(taskFromRow));
-    if (!page.data?.has_more) break;
-  }
-  const facets: Record<string, number> = {};
-  for (const task of matched) facets[task.status] = (facets[task.status] ?? 0) + 1;
-  const filtered = params.statuses.length ? matched.filter((task) => params.statuses.includes(task.status)) : matched;
-  return { items: filtered.slice(offset, offset + params.pageSize), total: filtered.length, facets };
+    const matched: StoredTask[] = [];
+    for (let searchOffset = 0; ; searchOffset += 200) {
+      const page = await listPage({ offset: searchOffset, limit: 200, statuses: [], keyword: params.keyword });
+      matched.push(...rowsFromPage(page).map(taskFromRow));
+      if (!page.data?.has_more) break;
+    }
+    const facets: Record<string, number> = {};
+    for (const task of matched) facets[task.status] = (facets[task.status] ?? 0) + 1;
+    const filtered = params.statuses.length ? matched.filter((task) => params.statuses.includes(task.status)) : matched;
+    return { items: filtered.slice(offset, offset + params.pageSize), total: filtered.length, facets };
+  });
 }
 
 export async function createReviewRecords(task: StoredTask, issues: CherryIssue[]) {
@@ -398,10 +430,15 @@ export async function createReviewRecords(task: StoredTask, issues: CherryIssue[
     const value = queue.shift();
     if (!value || typeof value !== "object") continue;
     for (const [key, child] of Object.entries(value)) {
-      if (key === "record_id_list" && Array.isArray(child)) return child.filter((item): item is string => typeof item === "string");
+      if (key === "record_id_list" && Array.isArray(child)) {
+        const ids = child.filter((item): item is string => typeof item === "string");
+        invalidateReviewReadCaches();
+        return ids;
+      }
       if (child && typeof child === "object") queue.push(child);
     }
   }
+  invalidateReviewReadCaches();
   return [];
 }
 
@@ -467,6 +504,7 @@ export async function deleteTaskRecord(recordId: string) {
     "base", "+record-delete", "--base-token", config.lark.baseToken,
     "--table-id", config.lark.taskTableId, "--record-id", recordId, "--yes", "--as", "user",
   ]);
+  invalidateReviewReadCaches();
   return true;
 }
 
@@ -477,6 +515,7 @@ export async function updateReviewRecord(taskId: string, itemId: string, status:
     审核结果: apiToReviewStatus[status],
     审核时间: status === "PENDING" ? null : formatDateTime(new Date()),
   }, itemId);
+  invalidateReviewReadCaches();
   const task = await getTaskRecord(taskId);
   if (!task) return false;
   const reviews = await listTaskReviewRecords(task);
@@ -532,29 +571,31 @@ const shiftMonth = (month: string, offset: number) => {
 };
 
 export async function getTaskStatistics(month: string) {
-  const tasks = await allTaskRecords();
-  const inMonth = (task: StoredTask, target: string) => task.createdAt.slice(0, 7) === target;
-  const current = tasks.filter((task) => inMonth(task, month));
-  const previousTotal = tasks.filter((task) => inMonth(task, shiftMonth(month, -1))).length;
-  const count = (status: string) => current.filter((task) => task.status === status).length;
-  const trend = Array.from({ length: 6 }, (_, index) => {
-    const label = shiftMonth(month, index - 5);
-    return { label, taskCount: tasks.filter((task) => inMonth(task, label)).length };
+  return readThroughCache(cacheKey("stats:tasks", { month }), statisticsCacheTtlMs, async () => {
+    const tasks = await allTaskRecords();
+    const inMonth = (task: StoredTask, target: string) => task.createdAt.slice(0, 7) === target;
+    const current = tasks.filter((task) => inMonth(task, month));
+    const previousTotal = tasks.filter((task) => inMonth(task, shiftMonth(month, -1))).length;
+    const count = (status: string) => current.filter((task) => task.status === status).length;
+    const trend = Array.from({ length: 6 }, (_, index) => {
+      const label = shiftMonth(month, index - 5);
+      return { label, taskCount: tasks.filter((task) => inMonth(task, label)).length };
+    });
+    return {
+      month,
+      totalTasks: current.length,
+      succeededTasks: count("SUCCEEDED"),
+      needsReviewTasks: count("NEEDS_REVIEW"),
+      reviewedTasks: count("REVIEWED"),
+      failedTasks: count("FAILED"),
+      processingTasks: count("PROCESSING") + count("QUEUED"),
+      autoMatchRate: current.length ? count("SUCCEEDED") / current.length : 0,
+      monthOverMonthRate: previousTotal ? (current.length - previousTotal) / previousTotal : 0,
+      totalDifferenceAmount: current.reduce((sum, task) => sum + Math.abs(task.differenceAmount ?? 0), 0).toFixed(2),
+      trend,
+      updatedAt: new Date().toISOString(),
+    };
   });
-  return {
-    month,
-    totalTasks: current.length,
-    succeededTasks: count("SUCCEEDED"),
-    needsReviewTasks: count("NEEDS_REVIEW"),
-    reviewedTasks: count("REVIEWED"),
-    failedTasks: count("FAILED"),
-    processingTasks: count("PROCESSING") + count("QUEUED"),
-    autoMatchRate: current.length ? count("SUCCEEDED") / current.length : 0,
-    monthOverMonthRate: previousTotal ? (current.length - previousTotal) / previousTotal : 0,
-    totalDifferenceAmount: current.reduce((sum, task) => sum + Math.abs(task.differenceAmount ?? 0), 0).toFixed(2),
-    trend,
-    updatedAt: new Date().toISOString(),
-  };
 }
 
 export function formatDateTime(date: Date) {
