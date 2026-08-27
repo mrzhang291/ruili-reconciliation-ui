@@ -7,6 +7,7 @@ import { config } from "./config.js";
 
 const execFileAsync = promisify(execFile);
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const retryDelaysMs = [800, 1_600, 3_200];
 
 export class LarkCliError extends Error {
   constructor(message: string, readonly code = "LARK_CLI_ERROR") {
@@ -39,24 +40,30 @@ function errorDetail(error: unknown) {
 
 export async function runLarkCli<T = Record<string, unknown>>(args: string[], cwd = projectRoot): Promise<T> {
   const { command, prefix } = resolveCliEntry();
-  try {
-    const { stdout } = await execFileAsync(command, [...prefix, "--profile", config.lark.profile, ...args], {
-      cwd,
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
-        LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
-      },
-    });
-    const payload = JSON.parse(stdout) as { ok?: boolean; error?: { message?: string } } & T;
-    if (payload.ok !== true) throw new LarkCliError(payload.error?.message || "lark-cli 返回失败");
-    return payload;
-  } catch (error) {
-    if (error instanceof LarkCliError) throw error;
-    throw new LarkCliError(errorDetail(error));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const { stdout } = await execFileAsync(command, [...prefix, "--profile", config.lark.profile, ...args], {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
+          LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
+        },
+      });
+      const payload = JSON.parse(stdout) as { ok?: boolean; error?: { message?: string } } & T;
+      if (payload.ok !== true) throw new LarkCliError(payload.error?.message || "lark-cli 返回失败");
+      return payload;
+    } catch (error) {
+      const detail = error instanceof LarkCliError ? error.message : errorDetail(error);
+      if (attempt < retryDelaysMs.length && /limited|rate limit/i.test(detail)) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+        continue;
+      }
+      throw error instanceof LarkCliError ? error : new LarkCliError(detail);
+    }
   }
 }
 

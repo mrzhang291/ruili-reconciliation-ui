@@ -8,6 +8,7 @@ import {
   deleteTaskRecord,
   fileSummary,
   getTaskDetail,
+  listReviewRecords,
   listTaskRecords,
   type StoredReviewItem,
   type StoredTask,
@@ -135,6 +136,29 @@ tasksRouter.get("/", async (req, res, next) => {
   }
 });
 
+tasksRouter.get("/review-items", async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(req.query.pageSize) || 100));
+    const statuses = typeof req.query.status === "string" ? req.query.status.split(",").filter(Boolean) : ["PENDING", "APPROVED", "IGNORED"];
+    if (statuses.some((status) => !["PENDING", "APPROVED", "IGNORED"].includes(status))) {
+      return res.status(400).json({ error: { code: "INVALID_REVIEW_STATUS", message: "包含不支持的审核状态", requestId: crypto.randomUUID() } });
+    }
+    const result = await listReviewRecords({ page, pageSize, statuses });
+    return res.json({
+      data: {
+        items: result.items.map(toReviewListRow),
+        page,
+        pageSize,
+        hasMore: result.hasMore,
+      },
+      requestId: crypto.randomUUID(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 tasksRouter.post("/:id/stop", async (req, res, next) => {
   try {
     const result = await cancelReconciliationTask(req.params.id);
@@ -203,5 +227,28 @@ export function toDetail(task: StoredTask, reviewItems: StoredReviewItem[]) {
       resolvedAt: item.resolvedAt,
     })),
     progressLogs: getTaskProgress(task.id),
+  };
+}
+
+function toReviewListRow(item: StoredReviewItem) {
+  const taskId = item.taskRecordId ?? item.taskId;
+  return {
+    task: {
+      id: taskId,
+      name: item.shopNo ? `${item.shopNo} 差异` : item.taskId,
+      status: item.status === "PENDING" ? "NEEDS_REVIEW" : "REVIEWED",
+      periodLabel: null,
+    },
+    item: {
+      id: item.id,
+      rowLabel: item.title,
+      fieldName: item.title,
+      settlementValue: null,
+      erpValue: null,
+      differenceAmount: item.differenceAmount?.toString() ?? null,
+      status: item.status,
+      message: item.message,
+      suggestion: item.suggestion,
+    },
   };
 }

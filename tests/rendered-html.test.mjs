@@ -148,8 +148,13 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(modelTypes, /BatchGroupSummary/);
   assert.match(modelTypes, /BatchAmountCandidate/);
   assert.doesNotMatch(modelTypes, /apiKey: string/);
+  assert.match(modelTypes, /ReconciliationReviewRow/);
+  assert.match(httpClient, /listReviewItems/);
+  assert.match(serverTasks, /tasksRouter\.get\("\/review-items"/);
+  assert.match(serverTasks, /listReviewRecords/);
   assert.match(reviewHook, /reconciliationApi\.updateReviewItem/);
-  assert.match(reviewHook, /\["NEEDS_REVIEW", "REVIEWED"\]/);
+  assert.match(reviewHook, /reconciliationApi\.listReviewItems/);
+  assert.doesNotMatch(reviewHook, /reconciliationApi\.listTasks/);
   assert.match(overview, /window\.confirm/);
   assert.match(overview, /record\.name/);
   assert.match(app, /BatchReconciliationView/);

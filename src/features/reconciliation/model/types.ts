@@ -71,6 +71,18 @@ export type ReconciliationTaskDetail = ReconciliationTaskSummary & {
   } | null;
 };
 
+export type ReconciliationReviewTask = {
+  id: string;
+  name: string | null;
+  status: ReconciliationStatus;
+  periodLabel: string | null;
+};
+
+export type ReconciliationReviewRow = {
+  task: ReconciliationReviewTask;
+  item: ReconciliationReviewItem;
+};
+
 export type ReconciliationStatistics = {
   month: string;
   totalTasks: number;

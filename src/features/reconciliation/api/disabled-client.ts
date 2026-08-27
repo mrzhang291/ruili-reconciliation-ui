@@ -156,6 +156,11 @@ export class DisabledReconciliationApi implements ReconciliationApi {
     };
   }
 
+  async listReviewItems() {
+    await wait(120);
+    return [];
+  }
+
   async getTask(taskId: string) {
     await wait(120);
     const task = disabledTasks.find((item) => item.id === taskId);

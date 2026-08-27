@@ -19,6 +19,7 @@ import type {
   PaginatedErpRecords,
   PaginatedTasks,
   ReconciliationStatistics,
+  ReconciliationReviewRow,
   ReconciliationTaskDetail,
   ReconciliationTaskSummary,
   ReviewItemStatus,
@@ -40,6 +41,7 @@ export interface ReconciliationApi {
   deleteErpRecord(recordId: string): Promise<{ deleted: boolean; record: ErpRecord }>;
   importErpFile(input: ImportErpFileInput): Promise<ErpImportResult>;
   listTasks(params?: ListReconciliationTasksParams): Promise<PaginatedTasks>;
+  listReviewItems(): Promise<ReconciliationReviewRow[]>;
   getTask(taskId: string): Promise<ReconciliationTaskDetail>;
   stopTask(taskId: string): Promise<void>;
   deleteTask(taskId: string): Promise<void>;

@@ -73,6 +73,7 @@ export type StoredTask = {
 export type StoredReviewItem = {
   id: string;
   title: string;
+  taskRecordId: string | null;
   taskId: string;
   shopNo: string | null;
   differenceAmount: number | null;
@@ -167,6 +168,7 @@ function reviewFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredRevi
   return {
     id: row.id,
     title: asText(value.明细标题) || asText(value.明细ID) || "差异明细",
+    taskRecordId: asLinks(value.关联任务)[0] ?? null,
     taskId: asText(value.任务ID),
     shopNo: asText(value.店铺号) || null,
     differenceAmount: asNumber(value.差异金额),
@@ -260,10 +262,46 @@ export async function getReviewRecords(recordIds: string[]) {
   return rowsFromPage(await runLarkCli<PageEnvelope>(args)).map(reviewFromRow);
 }
 
+function reviewListFilter(params: { statuses: string[]; taskId?: string }) {
+  const conditions: unknown[] = [];
+  const baseStatuses = params.statuses.map((status) => apiToReviewStatus[status]).filter(Boolean);
+  if (baseStatuses.length) conditions.push(["审核结果", "intersects", baseStatuses]);
+  if (params.taskId) conditions.push(["任务ID", "==", params.taskId]);
+  return conditions.length ? { logic: "and", conditions } : undefined;
+}
+
+async function reviewListPage(params: { offset: number; limit: number; statuses: string[]; taskId?: string }) {
+  const args = ["base", "+record-list", "--base-token", config.lark.baseToken, "--table-id", config.lark.reviewTableId];
+  const filter = reviewListFilter(params);
+  if (filter) args.push("--filter-json", JSON.stringify(filter));
+  args.push("--sort-json", JSON.stringify([{ field: "创建时间", desc: true }]), "--offset", String(params.offset), "--limit", String(params.limit), "--format", "json", "--as", "user");
+  for (const field of reviewFields) args.push("--field-id", field);
+  return runLarkCli<PageEnvelope>(args);
+}
+
+export async function listReviewRecords(params: { page: number; pageSize: number; statuses: string[]; taskId?: string }) {
+  const offset = (params.page - 1) * params.pageSize;
+  const page = await reviewListPage({ offset, limit: params.pageSize, statuses: params.statuses, taskId: params.taskId });
+  return {
+    items: rowsFromPage(page).map(reviewFromRow),
+    hasMore: Boolean(page.data?.has_more),
+  };
+}
+
+async function listTaskReviewRecords(task: StoredTask) {
+  const items: StoredReviewItem[] = [];
+  for (let page = 1; ; page += 1) {
+    const result = await listReviewRecords({ page, pageSize: 200, statuses: [], taskId: task.taskId });
+    items.push(...result.items);
+    if (!result.hasMore) break;
+  }
+  return items;
+}
+
 export async function getTaskDetail(recordId: string) {
   const task = await getTaskRecord(recordId);
   if (!task) return null;
-  return { task, reviewItems: await getReviewRecords(task.reviewIds) };
+  return { task, reviewItems: await listTaskReviewRecords(task) };
 }
 
 function listFilter(statuses: string[]) {
@@ -441,7 +479,7 @@ export async function updateReviewRecord(taskId: string, itemId: string, status:
   }, itemId);
   const task = await getTaskRecord(taskId);
   if (!task) return false;
-  const reviews = await getReviewRecords(task.reviewIds);
+  const reviews = await listTaskReviewRecords(task);
   const allDone = reviews.length > 0 && reviews.every((review) => review.id === itemId ? status !== "PENDING" : review.status !== "PENDING");
   if (allDone && task.status === "NEEDS_REVIEW") await updateTaskRecord(taskId, { 状态: "已审核" });
   if (!allDone && task.status === "REVIEWED") await updateTaskRecord(taskId, { 状态: "待审核" });

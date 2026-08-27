@@ -19,6 +19,7 @@ import type {
   PaginatedTasks,
   PrecheckBatchInput,
   ReconciliationProcessLog,
+  ReconciliationReviewRow,
   ReconciliationReviewItem,
   ReconciliationStatistics,
   ReconciliationTaskDetail,
@@ -96,6 +97,33 @@ type RawDetail = RawSummary & {
   progressLogs?: ReconciliationProcessLog[];
 };
 
+type RawReviewListRow = {
+  task: {
+    id: string;
+    name: string | null;
+    status: string;
+    periodLabel: string | null;
+  };
+  item: {
+    id: string;
+    rowLabel: string;
+    fieldName: string;
+    settlementValue: string | null;
+    erpValue: string | null;
+    differenceAmount: string | null;
+    status: string;
+    message: string;
+    suggestion: string | null;
+  };
+};
+
+type RawReviewListResponse = {
+  items: RawReviewListRow[];
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+};
+
 type RawListResponse = {
   items: RawSummary[];
   page: number;
@@ -166,6 +194,28 @@ function toDetail(raw: RawDetail): ReconciliationTaskDetail {
         status: item.status as ReconciliationReviewItem["status"],
       };
     }),
+  };
+}
+
+function toReviewRow(raw: RawReviewListRow): ReconciliationReviewRow {
+  return {
+    task: {
+      id: raw.task.id,
+      name: raw.task.name,
+      status: statusFromString(raw.task.status),
+      periodLabel: raw.task.periodLabel,
+    },
+    item: {
+      id: raw.item.id,
+      rowLabel: raw.item.rowLabel,
+      fieldName: raw.item.fieldName,
+      settlementValue: money(raw.item.settlementValue),
+      erpValue: money(raw.item.erpValue),
+      differenceAmount: money(raw.item.differenceAmount),
+      message: raw.item.message,
+      suggestion: raw.item.suggestion,
+      status: raw.item.status as ReconciliationReviewItem["status"],
+    },
   };
 }
 
@@ -603,6 +653,21 @@ export class HttpReconciliationApi implements ReconciliationApi {
       total: raw.total,
       facets: { total: raw.facets.total, byStatus },
     };
+  }
+
+  async listReviewItems(): Promise<ReconciliationReviewRow[]> {
+    const rows: ReconciliationReviewRow[] = [];
+    for (let page = 1; ; page += 1) {
+      const query = new URLSearchParams({
+        page: String(page),
+        pageSize: "200",
+        status: "PENDING,APPROVED,IGNORED",
+      });
+      const raw = await this.request<RawReviewListResponse>(`/api/tasks/review-items?${query.toString()}`);
+      rows.push(...raw.items.map(toReviewRow));
+      if (!raw.hasMore) break;
+    }
+    return rows;
   }
 
   async getTask(taskId: string): Promise<ReconciliationTaskDetail> {
