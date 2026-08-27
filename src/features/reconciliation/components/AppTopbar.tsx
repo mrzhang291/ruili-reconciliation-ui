@@ -10,8 +10,11 @@ type AppTopbarProps = {
 
 const viewLabels: Record<WorkspaceView, string> = {
   start: "发起对账",
+  batch: "批量对账",
   overview: "对账总览",
   review: "差异处理",
+  erp: "ERP 明细",
+  erpImport: "新增 ERP",
   settings: "连接设置",
 };
 

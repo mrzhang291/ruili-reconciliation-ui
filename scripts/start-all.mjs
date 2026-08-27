@@ -15,6 +15,7 @@ const FRONTEND_PORT = 3333;
 const CONFIG_PORT = 3334;
 const LOG_DIR = path.join(ROOT, ".runtime", "logs");
 const NO_BROWSER = process.argv.includes("--no-browser");
+const RESTART = process.argv.includes("--restart");
 const LARK_PROFILE = "aad27213";
 const log = (message) => console.log(`[一键启动] ${message}`);
 
@@ -126,6 +127,34 @@ export function portOpen(port, host = "127.0.0.1") {
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+function findWindowsPidsByPort(port) {
+  try {
+    const output = execFileSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const pids = new Set();
+    for (const line of output.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length >= 5 && columns[0] === "TCP" && columns[1].endsWith(`:${port}`) && columns[3] === "LISTENING") {
+        pids.add(columns[4]);
+      }
+    }
+    return [...pids];
+  } catch {
+    return [];
+  }
+}
+
+function stopPort(port) {
+  if (process.platform !== "win32") return;
+  for (const pid of findWindowsPidsByPort(port)) {
+    try {
+      execFileSync("taskkill", ["/PID", pid, "/T", "/F"], { stdio: "ignore" });
+      log(`已重启端口 ${port}，终止旧进程 ${pid}`);
+    } catch {
+      // 进程可能已退出。
+    }
+  }
+}
+
 function runtimeLog(name) { mkdirSync(LOG_DIR, { recursive: true }); return path.join(LOG_DIR, name); }
 function spawnBackground(command, args, options, logPath) {
   const output = openSync(logPath, "a");
@@ -150,10 +179,11 @@ export async function backendHealthy(port) {
 
 export async function ensureBackend(settings, cherryApiKey) {
   if (!cherryApiKey) return false;
+  if (RESTART) stopPort(settings.backendPort);
   if (await portOpen(settings.backendPort)) return backendHealthy(settings.backendPort);
   const logPath = runtimeLog("backend.log");
   const tsx = path.join(SERVER_DIR, "node_modules", "tsx", "dist", "cli.mjs");
-  spawnBackground(process.execPath, [tsx, "src/index.ts"], {
+  spawnBackground(process.execPath, [tsx, "watch", "src/index.ts"], {
     cwd: SERVER_DIR, env: { ...process.env, CHERRYSTUDIO_API_KEY: cherryApiKey },
   }, logPath);
   for (let attempt = 0; attempt < 25; attempt += 1) {
@@ -172,8 +202,9 @@ async function ensureConfigServer() {
 }
 
 async function ensureFrontend() {
-  if (await portOpen(FRONTEND_PORT)) return;
   runNpm(["run", "build"], ROOT);
+  if (RESTART) stopPort(FRONTEND_PORT);
+  if (await portOpen(FRONTEND_PORT)) return;
   const logPath = runtimeLog("frontend.log");
   spawnBackground(process.execPath, [path.join(ROOT, "node_modules", "vite", "bin", "vite.js"), "preview", "--host", "127.0.0.1", "--port", String(FRONTEND_PORT)], { cwd: ROOT, env: process.env }, logPath);
   for (let attempt = 0; attempt < 15; attempt += 1) { await delay(700); if (await portOpen(FRONTEND_PORT)) return; }

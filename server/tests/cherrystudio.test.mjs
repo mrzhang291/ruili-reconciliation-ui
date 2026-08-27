@@ -9,38 +9,33 @@ import { config } from "../dist/lib/config.js";
 import { buildReconciliationPrompt } from "../dist/services/reconciliation.js";
 
 const contractResult = (overrides = {}) => ({
-  matched: false,
-  erpAmount: 99,
   settlementAmount: 100,
-  difference: -1,
-  issues: "结算单比 ERP 多计 1 元。",
+  settlementAmountLabel: "结算净营业额",
+  issues: "结算单金额字段存在多个候选。",
   period: "2026-05",
-  name: "京东商城",
+  name: "SHNKA2",
   ...overrides,
 });
 
-test("parses the exact seven-field Agent result and creates a review item", () => {
-  const payload = contractResult({ difference: -5, issues: "结算金额比 ERP 多 5 元。" });
+test("parses the exact five-field settlement extraction result", () => {
+  const payload = contractResult({ settlementAmount: 512047, issues: "已按规则采用结算净营业额。" });
   const result = parseAgentResponse(JSON.stringify(payload));
 
-  assert.equal(result?.difference, -5);
-  assert.equal(result?.erpAmount, 99);
-  assert.equal(result?.settlementAmount, 100);
-  assert.equal(result?.issues[0].differenceAmount, -5);
-  assert.equal(result?.issues[0].message, "结算金额比 ERP 多 5 元。");
-  assert.equal(result?.name, "京东商城");
+  assert.equal(result?.settlementAmount, 512047);
+  assert.equal(result?.settlementAmountLabel, "结算净营业额");
+  assert.equal(result?.issues[0].settlementAmount, 512047);
+  assert.equal(result?.issues[0].message, "已按规则采用结算净营业额。");
+  assert.equal(result?.name, "SHNKA2");
   assert.equal(result?.period, "2026-05");
   assert.deepEqual(result?.rawAgentPayload, payload);
 });
 
-test("accepts a matched result with an empty issues string", () => {
+test("accepts a clean extraction with an empty issues string", () => {
   const result = parseAgentResponse(JSON.stringify(contractResult({
-    matched: true,
-    difference: 0,
     issues: "",
   })));
 
-  assert.equal(result?.matched, true);
+  assert.equal(result?.settlementAmount, 100);
   assert.deepEqual(result?.issues, []);
 });
 
@@ -80,7 +75,6 @@ test("keeps reasoning and tool details in stable process logs", async () => {
 
   const thoughtUpdates = processEvents.filter((event) => event.options?.details?.includes("the JPG using mineru"));
   assert.equal(new Set(thoughtUpdates.map((event) => event.options.id)).size, 1);
-  assert.equal(thoughtUpdates[0].options.expanded, true);
   assert.equal(thoughtUpdates.at(-1).options.expanded, false);
   assert.equal(thoughtUpdates.at(-1).options.details, reasoning);
   assert.equal(
@@ -93,51 +87,25 @@ test("keeps reasoning and tool details in stable process logs", async () => {
   );
 });
 
-test("rejects contradictory matched results", () => {
-  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ matched: true, difference: 5, issues: "" }))), null);
-  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ difference: 0, issues: "" }))), null);
-  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ matched: true, difference: 0, issues: "仍有差异" }))), null);
+test("rejects old Agent-computed ERP results", () => {
+  assert.equal(parseAgentResponse(JSON.stringify({
+    matched: false,
+    erpAmount: 99,
+    settlementAmount: 100,
+    difference: -1,
+    issues: "",
+    period: "2026-05",
+    name: "SHNKA2",
+  })), null);
 });
 
-test("creates a reviewable summary when only a total difference is returned", () => {
-  const result = parseAgentResponse(JSON.stringify(contractResult({ difference: 17, issues: "" })));
-
-  assert.equal(result?.difference, 17);
-  assert.equal(result?.issues.length, 1);
-  assert.equal(result?.issues[0].differenceAmount, 17);
-});
-
-test("does not override the Agent result with server-side business rules", () => {
-  const issues = "ERP 中有 16% 和 17% 两档扣点（16%档销售额 86175 元），而结算单全部按 17% 计算；且 ERP 方未体现结算单中的调整项费用（合计 13,272.58 元）。此外 ERP 总销售额 512,042 与结算单净营业额 512,047 存在 5 元差异。";
-  const result = parseAgentResponse(JSON.stringify(contractResult({
-    difference: 15855.61,
-    issues,
-  })));
-
-  assert.equal(result?.difference, 15855.61);
-  assert.equal(result?.issues[0].differenceAmount, 15855.61);
-  assert.equal(result?.rawAgentPayload.difference, 15855.61);
-  assert.equal(result?.rawAgentPayload.issues, issues);
-});
-
-test("keeps the reported difference even when issues contain other amounts", () => {
-  const result = parseAgentResponse(JSON.stringify(contractResult({
-    difference: 857.6,
-    issues: "两方营业额口径差5元（ERP 512042元、结算单512047元），另有调整项 13272.58 元。",
-  })));
-
-  assert.equal(result?.difference, 857.6);
-  assert.equal(result?.issues[0].differenceAmount, 857.6);
-});
-
-test("requires exactly the seven documented fields and their documented types", () => {
+test("requires exactly the five documented fields and their documented types", () => {
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ name: "" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ name: undefined }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ period: "2026年-05月" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ period: "2026-13" }))), null);
-  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ difference: "-1" }))), null);
-  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ erpAmount: "99" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ settlementAmount: null }))), null);
+  assert.equal(parseAgentResponse(JSON.stringify(contractResult({ settlementAmountLabel: "" }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ issues: [] }))), null);
   assert.equal(parseAgentResponse(JSON.stringify(contractResult({ issues: undefined }))), null);
   assert.equal(parseAgentResponse(JSON.stringify({ ...contractResult(), extra: true })), null);
@@ -146,19 +114,23 @@ test("requires exactly the seven documented fields and their documented types", 
 test("keeps Agent artifacts inside the task work directory", () => {
   const prompt = buildReconciliationPrompt({
     settlementFileUrl: "http://127.0.0.1/settlement",
-    erpFileUrl: "http://127.0.0.1/erp",
     settlementFilePath: "C:/files/settlement.xlsx",
-    erpFilePath: "C:/files/erp.xlsx",
+    settlementFileName: "SHNKA2结算单-202605.pdf",
+    shopNo: "SHNKA2",
     submittedAt: new Date(0).toISOString(),
     taskId: "test-task",
     taskWorkDir: "C:/runtime/tasks/test-task",
   });
 
-  assert.match(prompt, /http:\/\/127\.0\.0\.1\/erp/);
+  assert.doesNotMatch(prompt, /http:\/\/127\.0\.0\.1\/erp/);
   assert.match(prompt, /C:\/runtime\/tasks\/test-task/);
   assert.match(prompt, /不要在项目根目录、源码目录或输入文件旁创建文件/);
-  assert.match(prompt, /ERP：C:\/files\/erp\.xlsx/);
+  assert.doesNotMatch(prompt, /ERP：C:\/files\/erp\.xlsx/);
   assert.match(prompt, /结算单：C:\/files\/settlement\.xlsx/);
+  assert.match(prompt, /SHNKA2/);
+  assert.match(prompt, /不要先调用 WindowsApps 里的 python3/);
+  assert.match(prompt, /不要读取、计算、猜测或输出 ERP\/DRP 金额/);
+  assert.match(prompt, /后端已从文件名确定本次店铺号：SHNKA2/);
 });
 
 test("paginates agents and creates a new session", async () => {

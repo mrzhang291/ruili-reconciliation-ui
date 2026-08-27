@@ -73,7 +73,7 @@ export function OverviewView() {
           <div><h2>历史对账</h2><span>共 {total} 条任务</span></div>
           <label className="search-box">
             <span aria-hidden="true">⌕</span>
-            <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="搜索商城名称、任务编号或文件" />
+            <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="搜索店铺号、任务编号或文件" />
           </label>
         </div>
 
@@ -91,7 +91,7 @@ export function OverviewView() {
 
         <div className="table-wrap">
           <table>
-            <thead><tr><th>商城 / 账期</th><th>文件</th><th>结算金额</th><th>匹配条目</th><th>差异金额</th><th>状态</th><th>执行时间</th><th aria-label="操作" /></tr></thead>
+            <thead><tr><th>店铺号 / 账期</th><th>文件</th><th>结算金额</th><th>匹配条目</th><th>差异金额</th><th>状态</th><th>执行时间</th><th aria-label="操作" /></tr></thead>
             <tbody>
               {records.map((record) => (
                 <tr key={record.id} onClick={() => void openDetails(record.id)}>

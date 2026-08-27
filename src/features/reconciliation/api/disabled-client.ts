@@ -2,14 +2,21 @@
 import { ReconciliationApiError } from "./error";
 import type { ReconciliationApi } from "./types";
 import type {
+  PrecheckBatchInput,
+  BatchPrecheckResult,
+  CreateBatchReconciliationTasksInput,
   CreateReconciliationTaskInput,
+  BatchUpdateErpRecordsInput,
   ListReconciliationTasksParams,
   Money,
   ReconciliationStatus,
   ReconciliationTaskSummary,
   ReconciliationTaskDetail,
   ReviewItemStatus,
+  SelectBatchDocumentAmountInput,
+  UpdateBatchDocumentIdentityInput,
 } from "../model/types";
+import type { ErpRecordInput, ListErpRecordsParams } from "../model/types";
 
 const money = (value: string): Money => ({ currency: "CNY", value });
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -26,6 +33,103 @@ export class DisabledReconciliationApi implements ReconciliationApi {
       "local-no-api",
       503,
     );
+  }
+
+  async precheckBatch(input: PrecheckBatchInput): Promise<BatchPrecheckResult> {
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError(
+      "未配置真实后端接口，无法执行批量预检",
+      "API_BASE_URL_REQUIRED",
+      "local-no-api",
+      503,
+    );
+  }
+
+  async createBatchTasks(input: CreateBatchReconciliationTasksInput): Promise<never> {
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError(
+      "未配置真实后端接口，无法批量创建对账任务",
+      "API_BASE_URL_REQUIRED",
+      "local-no-api",
+      503,
+    );
+  }
+
+  async getBatch(batchId: string): Promise<never> {
+    void batchId;
+    await wait(120);
+    throw new ReconciliationApiError(
+      "未配置真实后端接口，无法读取批量对账批次",
+      "API_BASE_URL_REQUIRED",
+      "local-no-api",
+      503,
+    );
+  }
+
+  async updateBatchDocumentIdentity(documentId: string, input: UpdateBatchDocumentIdentityInput): Promise<never> {
+    void documentId;
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法更新批量单据身份", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async selectBatchDocumentAmount(documentId: string, input: SelectBatchDocumentAmountInput): Promise<never> {
+    void documentId;
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法确认批量单据金额", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async exportBatchCsv(batchId: string): Promise<never> {
+    void batchId;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法导出批量对账", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async importErpFile(): Promise<never> {
+    await wait(120);
+    throw new ReconciliationApiError(
+      "未配置真实后端接口，无法更新 ERP 总表",
+      "API_BASE_URL_REQUIRED",
+      "local-no-api",
+      503,
+    );
+  }
+
+  async listErpRecords(params: ListErpRecordsParams = {}) {
+    void params;
+    await wait(120);
+    return { items: [], page: 1, pageSize: 50, total: 0 };
+  }
+
+  async getErpFilterOptions() {
+    await wait(120);
+    return { months: [] };
+  }
+
+  async createErpRecord(input: ErpRecordInput): Promise<never> {
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法新增 ERP 明细", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async updateErpRecord(recordId: string, input: ErpRecordInput): Promise<never> {
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError(`未配置真实后端接口，无法更新 ERP 明细 ${recordId}`, "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async batchUpdateErpRecords(input: BatchUpdateErpRecordsInput): Promise<never> {
+    void input;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法批量保存 ERP 明细", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
+  async deleteErpRecord(recordId: string): Promise<never> {
+    await wait(120);
+    throw new ReconciliationApiError(`未配置真实后端接口，无法删除 ERP 明细 ${recordId}`, "API_BASE_URL_REQUIRED", "local-no-api", 503);
   }
 
   async listTasks(params: ListReconciliationTasksParams = {}) {

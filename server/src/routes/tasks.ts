@@ -2,6 +2,8 @@ import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
 import { config } from "../lib/config.js";
+import { normalizeFileName } from "../lib/file-storage.js";
+import { settlementFileRejectionReason } from "../lib/settlement-file-rules.js";
 import {
   deleteTaskRecord,
   fileSummary,
@@ -20,6 +22,59 @@ import {
 export const tasksRouter = Router();
 const taskStatuses = ["QUEUED", "PROCESSING", "SUCCEEDED", "NEEDS_REVIEW", "REVIEWED", "FAILED", "CANCELLED", "OBSOLETE"];
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
+const settlementExtensions = new Set([".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"]);
+const settlementMimeTypes = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+]);
+const excelExtensions = new Set([".xlsx", ".xls"]);
+const excelMimeTypes = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+]);
+
+type UploadError = { code: string; message: string };
+
+function errorPayload(error: UploadError) {
+  return { error: { ...error, requestId: crypto.randomUUID() } };
+}
+
+function validateSettlementUpload(file: Express.Multer.File): UploadError | null {
+  const fileName = normalizeFileName(file.originalname);
+  if (!settlementExtensions.has(path.extname(fileName).toLowerCase())
+    || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !settlementMimeTypes.has(file.mimetype))) {
+    return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF、PNG 和 JPG 文件" };
+  }
+
+  const rejectedReason = settlementFileRejectionReason(fileName);
+  if (rejectedReason) return { code: "NOT_SETTLEMENT_FILE", message: rejectedReason };
+  return null;
+}
+
+function validateErpUpload(file: Express.Multer.File | undefined): UploadError | null {
+  if (!file) return null;
+  const fileName = normalizeFileName(file.originalname);
+  if (!excelExtensions.has(path.extname(fileName).toLowerCase())
+    || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !excelMimeTypes.has(file.mimetype))) {
+    return { code: "INVALID_ERP_FILE_TYPE", message: "ERP 文件仅支持 Excel" };
+  }
+  return null;
+}
+
+function parseAgentSelector(body: unknown): { name: string; workspace?: string } | UploadError {
+  const payload = body as Record<string, unknown> | undefined;
+  const agentName = typeof payload?.agentName === "string" ? payload.agentName.trim() : "";
+  if (!agentName) return { code: "AGENT_NAME_REQUIRED", message: "agentName 为必填字段" };
+  const workspace = typeof payload?.agentWorkspace === "string" ? payload.agentWorkspace.trim() : "";
+  return { name: agentName, workspace: workspace || undefined };
+}
+
+function toCreateTaskFile(file: Express.Multer.File) {
+  return { buffer: file.buffer, originalName: file.originalname, contentType: file.mimetype };
+}
 
 tasksRouter.post("/", upload.fields([
   { name: "settlementFile", maxCount: 1 },
@@ -29,30 +84,26 @@ tasksRouter.post("/", upload.fields([
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
     const settlement = files?.settlementFile?.[0];
     const erp = files?.erpFile?.[0];
-    if (!settlement || !erp) {
-      return res.status(400).json({ error: { code: "MISSING_FILES", message: "需要上传结算资料和 ERP 资料两份文件", requestId: crypto.randomUUID() } });
+    if (!settlement) {
+      return res.status(400).json(errorPayload({ code: "MISSING_FILES", message: "需要上传结算资料" }));
     }
-    const extensions = new Set([".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"]);
-    const mimeTypes = new Set([
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel",
-      "application/pdf", "image/png", "image/jpeg",
-    ]);
-    if ([settlement, erp].some((file) => !extensions.has(path.extname(file.originalname).toLowerCase())
-      || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !mimeTypes.has(file.mimetype)))) {
-      return res.status(400).json({ error: { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF、PNG 和 JPG 文件", requestId: crypto.randomUUID() } });
+
+    const settlementError = validateSettlementUpload(settlement);
+    if (settlementError) return res.status(400).json(errorPayload(settlementError));
+
+    const erpError = validateErpUpload(erp);
+    if (erpError) return res.status(400).json(errorPayload(erpError));
+
+    const agentSelector = parseAgentSelector(req.body);
+    if ("code" in agentSelector) {
+      return res.status(400).json(errorPayload(agentSelector));
     }
-    const agentName = typeof req.body?.agentName === "string" ? req.body.agentName.trim() : "";
-    if (!agentName) {
-      return res.status(400).json({ error: { code: "AGENT_NAME_REQUIRED", message: "agentName 为必填字段", requestId: crypto.randomUUID() } });
-    }
+
     const logs: ProgressLog[] = [];
     const task = await createReconciliationTask({
-      settlementFile: { buffer: settlement.buffer, originalName: settlement.originalname, contentType: settlement.mimetype },
-      erpFile: { buffer: erp.buffer, originalName: erp.originalname, contentType: erp.mimetype },
-      agentSelector: {
-        name: agentName,
-        workspace: typeof req.body?.agentWorkspace === "string" ? req.body.agentWorkspace.trim() || undefined : undefined,
-      },
+      settlementFile: toCreateTaskFile(settlement),
+      erpFile: erp ? toCreateTaskFile(erp) : undefined,
+      agentSelector,
       onProgress: (log) => logs.push(log),
     });
     return res.status(202).json({ data: { taskId: task.id, status: task.status, logs }, requestId: crypto.randomUUID() });
@@ -124,10 +175,13 @@ tasksRouter.get("/:id", async (req, res, next) => {
 });
 
 export function toSummary(task: StoredTask) {
+  const settlementFile = fileSummary(task.id, "SETTLEMENT", task.settlementFile);
+  const erpFile = fileSummary(task.id, "ERP", task.erpFile);
+  const displayName = task.shopNo || settlementFile.name.replace(/\.[^.]+$/, "") || task.name;
   return {
-    id: task.id, name: task.name, status: task.status, periodLabel: task.period, version: 1,
-    settlementFile: fileSummary(task.id, "SETTLEMENT", task.settlementFile),
-    erpFile: fileSummary(task.id, "ERP", task.erpFile),
+    id: task.id, name: displayName, status: task.status, periodLabel: task.period, version: 1,
+    settlementFile,
+    erpFile,
     metrics: {
       settlementAmount: task.settlementAmount?.toString() ?? null,
       erpAmount: task.erpAmount?.toString() ?? null,

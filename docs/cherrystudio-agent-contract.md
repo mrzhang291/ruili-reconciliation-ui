@@ -36,11 +36,11 @@ Agent 最终必须返回：
   "difference": -5.0,
   "issues": "结算金额比 ERP 多 5 元，疑似存在退款记录未同步。",
   "period": "2026-05",
-  "name": "京东商城"
+  "name": "SHNKA2"
 }
 ```
 
-顶层必须且只应返回 `matched`、`difference`、`issues`、`period`、`name` 五个字段。`issues` 必须是字符串；没有疑似原因时返回空字符串。`period` 必须从 DRP 表单读取并使用 `YYYY-MM` 格式；`name` 必须是 DRP 表单中的商城名称，不能为空，也不能用文件名、Agent 名称或任务 ID 代替。后端将 `name` 作为对账总览中的任务名称。
+顶层必须且只应返回 `matched`、`difference`、`issues`、`period`、`name` 五个字段。`issues` 必须是字符串；没有疑似原因时返回空字符串。`period` 必须从 DRP 表单读取并使用 `YYYY-MM` 格式；`name` 必须是结算单对应的店铺号，不能为空，也不能用 Agent 名称或任务 ID 代替。后端将 `name` 作为店铺号写入对账任务。
 
 差额方向固定为 `ERP 金额 - 结算金额`。后端会拒绝以下不符合契约或自相矛盾的结果：
 

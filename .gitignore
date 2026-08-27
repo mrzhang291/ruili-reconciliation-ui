@@ -38,6 +38,8 @@ yarn-error.log*
 /reconciliation_tmp/
 /msgs.json
 /sessions_raw.json
+/*agents.json
+/.claude/skills/
 *.tsbuildinfo
 
 # 对账测试数据（含财务信息，不提交）

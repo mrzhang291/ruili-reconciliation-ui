@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findCreatedRecordId, formulaChecksReady, rowsFromPage } from "../dist/lib/lark-store.js";
+import { findCreatedRecordId, formulaChecksReady, isLarkRecordId, rowsFromPage } from "../dist/lib/lark-store.js";
 
 test("reads the record ID returned by lark-cli record-upsert", () => {
   assert.equal(findCreatedRecordId({ data: { record: { record_id_list: ["recvsUgd2jAPoR"] } } }), "recvsUgd2jAPoR");
@@ -15,4 +15,9 @@ test("ignores tombstone rows returned for deleted Feishu records", () => {
 test("waits until Feishu formula checks leave their pending state", () => {
   assert.equal(formulaChecksReady({ differenceCheck: "待校验", reasonablenessCheck: "通过", differenceAmount: -5 }), false);
   assert.equal(formulaChecksReady({ differenceCheck: "通过", reasonablenessCheck: "通过", differenceAmount: -5 }), true);
+});
+
+test("validates Feishu record IDs before calling lark-cli", () => {
+  assert.equal(isLarkRecordId("recvttJzkzE1uo"), true);
+  assert.equal(isLarkRecordId("not-a-real-task"), false);
 });

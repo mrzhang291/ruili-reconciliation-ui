@@ -1,10 +1,23 @@
 import { ReconciliationApiError } from "./error";
 import type { ReconciliationApi } from "./types";
 import type {
+  BatchPrecheckResult,
+  BatchReconciliationTaskCreateResult,
+  CreateBatchReconciliationTasksInput,
   CreateReconciliationTaskInput,
+  BatchUpdateErpRecordsInput,
+  BatchUpdateErpRecordsResult,
+  ErpFilterOptions,
+  ErpImportResult,
+  ErpRecord,
+  ErpRecordInput,
+  ImportErpFileInput,
+  ListErpRecordsParams,
   ListReconciliationTasksParams,
+  PaginatedErpRecords,
   Money,
   PaginatedTasks,
+  PrecheckBatchInput,
   ReconciliationProcessLog,
   ReconciliationReviewItem,
   ReconciliationStatistics,
@@ -12,6 +25,8 @@ import type {
   ReconciliationTaskSummary,
   ReconciliationStatus,
   ReviewItemStatus,
+  SelectBatchDocumentAmountInput,
+  UpdateBatchDocumentIdentityInput,
 } from "../model/types";
 
 type HttpConfig = {
@@ -216,7 +231,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
 
     const formData = new FormData();
     formData.append("settlementFile", input.settlementFile);
-    formData.append("erpFile", input.erpFile);
+    if (input.erpFile) formData.append("erpFile", input.erpFile);
     formData.append("agentName", agentName);
     if (input.agentSelector.workspace) formData.append("agentWorkspace", input.agentSelector.workspace);
 
@@ -301,10 +316,10 @@ export class HttpReconciliationApi implements ReconciliationApi {
         uploadedAt: new Date().toISOString(),
       },
       erpFile: {
-        id: "pending",
-        name: input.erpFile.name,
-        size: input.erpFile.size,
-        type: input.erpFile.type,
+        id: input.erpFile ? "pending" : "feishu-erp-base",
+        name: input.erpFile?.name ?? "飞书ERP明细表",
+        size: input.erpFile?.size ?? 0,
+        type: input.erpFile?.type ?? "",
         extension: null,
         uploadedAt: new Date().toISOString(),
       },
@@ -322,6 +337,241 @@ export class HttpReconciliationApi implements ReconciliationApi {
     };
 
     return placeholder;
+  }
+
+  async precheckBatch(input: PrecheckBatchInput): Promise<BatchPrecheckResult> {
+    if (!input.settlementFiles.length) {
+      throw new ReconciliationApiError("请至少选择一份结算资料", "MISSING_FILES", undefined, 400);
+    }
+
+    const formData = new FormData();
+    for (const file of input.settlementFiles) {
+      formData.append("settlementFiles", file, (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name);
+    }
+    if (input.erpFile) formData.append("erpFile", input.erpFile);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/batches`, {
+        method: "POST",
+        body: formData,
+      });
+    } catch {
+      throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");
+    }
+
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      // ignore
+    }
+
+    if (!response.ok) {
+      const errorPayload = payload as { error?: { code?: string; message?: string; requestId?: string } } | null;
+      throw new ReconciliationApiError(
+        errorPayload?.error?.message ?? `批量预检失败（HTTP ${response.status}）`,
+        errorPayload?.error?.code ?? "BATCH_PRECHECK_FAILED",
+        errorPayload?.error?.requestId,
+        response.status,
+      );
+    }
+
+    const envelope = payload as { data?: BatchPrecheckResult } | null;
+    if (!envelope?.data) {
+      throw new ReconciliationApiError("后端已响应，但没有返回批量预检结果", "INVALID_BATCH_PRECHECK_RESPONSE");
+    }
+    return envelope.data;
+  }
+
+  async getBatch(batchId: string): Promise<BatchPrecheckResult> {
+    return this.request<BatchPrecheckResult>(`/api/batches/${encodeURIComponent(batchId)}`);
+  }
+
+  async createBatchTasks(input: CreateBatchReconciliationTasksInput): Promise<BatchReconciliationTaskCreateResult> {
+    if (!input.batchId) {
+      throw new ReconciliationApiError("缺少批处理 ID", "BATCH_ID_REQUIRED", undefined, 400);
+    }
+
+    input.onProgress?.({
+      id: `local:${crypto.randomUUID()}`,
+      timestamp: new Date().toISOString(),
+      level: "info",
+      message: `正在执行批处理 ${input.batchId} 的可执行组…`,
+    });
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/batches/${encodeURIComponent(input.batchId)}/execute`, {
+        method: "POST",
+      });
+    } catch {
+      throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");
+    }
+
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      // ignore
+    }
+
+    if (!response.ok) {
+      const errorPayload = payload as { error?: { code?: string; message?: string; requestId?: string } } | null;
+      const message = errorPayload?.error?.message ?? `批量创建任务失败（HTTP ${response.status}）`;
+      input.onProgress?.({
+        id: `local:${crypto.randomUUID()}`,
+        timestamp: new Date().toISOString(),
+        level: "error",
+        message,
+      });
+      throw new ReconciliationApiError(
+        message,
+        errorPayload?.error?.code ?? "CREATE_BATCH_TASKS_FAILED",
+        errorPayload?.error?.requestId,
+        response.status,
+      );
+    }
+
+    const envelope = payload as { data?: BatchReconciliationTaskCreateResult } | null;
+    if (!envelope?.data) {
+      throw new ReconciliationApiError("后端已响应，但没有返回批量任务结果", "INVALID_CREATE_BATCH_TASKS_RESPONSE");
+    }
+
+    for (const item of envelope.data.items) {
+      for (const log of item.logs ?? []) {
+        input.onProgress?.({
+          ...log,
+          id: `${item.taskId ?? item.fileName}:${log.id}`,
+          message: `[${item.fileName}] ${log.message}`,
+        });
+      }
+      if (item.error) {
+        input.onProgress?.({
+          id: `local:${crypto.randomUUID()}`,
+          timestamp: new Date().toISOString(),
+          level: "error",
+          message: `[${item.fileName}] ${item.error.message}`,
+        });
+      }
+    }
+
+    return envelope.data;
+  }
+
+  async updateBatchDocumentIdentity(documentId: string, input: UpdateBatchDocumentIdentityInput): Promise<BatchPrecheckResult> {
+    return this.request<BatchPrecheckResult>(`/api/batches/documents/${encodeURIComponent(documentId)}/identity`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async selectBatchDocumentAmount(documentId: string, input: SelectBatchDocumentAmountInput): Promise<BatchPrecheckResult> {
+    return this.request<BatchPrecheckResult>(`/api/batches/documents/${encodeURIComponent(documentId)}/amount`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async exportBatchCsv(batchId: string): Promise<void> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/batches/${encodeURIComponent(batchId)}/export`);
+    } catch {
+      throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");
+    }
+    if (!response.ok) {
+      throw new ReconciliationApiError(`导出失败（HTTP ${response.status}）`, "BATCH_EXPORT_FAILED", undefined, response.status);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${batchId}-batch-export.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async listErpRecords(params: ListErpRecordsParams = {}): Promise<PaginatedErpRecords> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return this.request<PaginatedErpRecords>(`/api/erp?${query.toString()}`);
+  }
+
+  async getErpFilterOptions(): Promise<ErpFilterOptions> {
+    return this.request<ErpFilterOptions>("/api/erp/options");
+  }
+
+  async createErpRecord(input: ErpRecordInput): Promise<ErpRecord> {
+    return this.request<ErpRecord>("/api/erp", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async updateErpRecord(recordId: string, input: ErpRecordInput): Promise<ErpRecord> {
+    return this.request<ErpRecord>(`/api/erp/${encodeURIComponent(recordId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async batchUpdateErpRecords(input: BatchUpdateErpRecordsInput): Promise<BatchUpdateErpRecordsResult> {
+    return this.request<BatchUpdateErpRecordsResult>("/api/erp/batch-update", {
+      method: "POST",
+      body: JSON.stringify({ items: input }),
+    });
+  }
+
+  async deleteErpRecord(recordId: string): Promise<{ deleted: boolean; record: ErpRecord }> {
+    return this.request<{ deleted: boolean; record: ErpRecord }>(`/api/erp/${encodeURIComponent(recordId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async importErpFile(input: ImportErpFileInput): Promise<ErpImportResult> {
+    const formData = new FormData();
+    formData.append("erpFile", input.file);
+    formData.append("mode", input.mode);
+    if (input.month) formData.append("month", input.month);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/erp/import`, {
+        method: "POST",
+        body: formData,
+      });
+    } catch {
+      throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");
+    }
+
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      // ignore
+    }
+
+    if (!response.ok) {
+      const errorPayload = payload as { error?: { code?: string; message?: string; requestId?: string } } | null;
+      throw new ReconciliationApiError(
+        errorPayload?.error?.message ?? `ERP 总表更新失败（HTTP ${response.status}）`,
+        errorPayload?.error?.code ?? "ERP_IMPORT_FAILED",
+        errorPayload?.error?.requestId,
+        response.status,
+      );
+    }
+
+    const envelope = payload as { data?: ErpImportResult } | null;
+    if (!envelope?.data) {
+      throw new ReconciliationApiError("后端已响应，但没有返回 ERP 导入结果", "INVALID_ERP_IMPORT_RESPONSE");
+    }
+    return envelope.data;
   }
 
   async listTasks(params: ListReconciliationTasksParams = {}): Promise<PaginatedTasks> {
@@ -366,11 +616,11 @@ export class HttpReconciliationApi implements ReconciliationApi {
   }
 
   async updateReviewItem(taskId: string, itemId: string, status: ReviewItemStatus) {
-    await this.request<unknown>(
+    const result = await this.request<{ task: RawDetail }>(
       `/api/tasks/${encodeURIComponent(taskId)}/review-items/${encodeURIComponent(itemId)}`,
       { method: "PATCH", body: JSON.stringify({ status }) },
     );
-    return this.getTask(taskId);
+    return toDetail(result.task);
   }
 
   async getStatistics(month?: string): Promise<ReconciliationStatistics> {

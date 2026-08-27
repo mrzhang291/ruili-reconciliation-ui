@@ -23,7 +23,24 @@ export type CherryIssue = {
   status?: "PENDING" | "APPROVED" | "IGNORED";
 };
 
-export type CherryParseResult = {
+export type SettlementExtractionResult = {
+  name: string;
+  settlementAmount: number;
+  settlementAmountLabel: string;
+  issues: CherryIssue[];
+  period: string;
+  rawAgentPayload: {
+    settlementAmount: number;
+    settlementAmountLabel: string;
+    issues: string;
+    period: string;
+    name: string;
+  };
+};
+
+export type CherryParseResult = SettlementExtractionResult;
+
+export type ReconciliationResult = {
   name: string;
   matched: boolean;
   erpAmount: number;
@@ -31,15 +48,7 @@ export type CherryParseResult = {
   difference: number;
   issues: CherryIssue[];
   period: string;
-  rawAgentPayload: {
-    matched: boolean;
-    erpAmount: number;
-    settlementAmount: number;
-    difference: number;
-    issues: string;
-    period: string;
-    name: string;
-  };
+  rawAgentPayload: Record<string, unknown>;
 };
 
 export type CherryAgentSession = {
@@ -297,7 +306,7 @@ export async function sendReconciliationPrompt(
     const parsed = parseAgentResponse(finalText);
     if (!parsed) {
       throw new CherryStudioError(
-        "Agent 返回格式不符合 { matched, erpAmount, settlementAmount, difference, issues, period, name } 契约",
+        "Agent 返回格式不符合 { settlementAmount, settlementAmountLabel, issues, period, name } 契约",
         "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
       );
     }
@@ -313,7 +322,7 @@ export async function sendReconciliationPrompt(
   const parsed = parseAgentResponse(text);
   if (!parsed) {
     throw new CherryStudioError(
-      "Agent 返回格式不符合 { matched, erpAmount, settlementAmount, difference, issues, period, name } 契约",
+      "Agent 返回格式不符合 { settlementAmount, settlementAmountLabel, issues, period, name } 契约",
       "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
     );
   }
@@ -540,7 +549,7 @@ export async function readSseFinalText(
 
 /**
  * 解析 agent 返回的文本（JSON 或 SSE 流中的 JSON）。
- * 从各种嵌套结构里提取 { matched, difference, issues }。
+ * 从各种嵌套结构里提取结算单事实。
  */
 export function parseAgentResponse(text: string): CherryParseResult | null {
   // 尝试从整段文本解析
@@ -599,13 +608,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function extractResult(input: unknown): CherryParseResult | null {
   if (!isRecord(input)) return null;
 
-  // 顶层必须符合七字段契约。
-  if (typeof input.matched === "boolean") {
+  // 顶层必须符合结算单五字段抽取契约。
+  if ("settlementAmount" in input) {
     const expectedKeys = [
-      "matched",
-      "erpAmount",
       "settlementAmount",
-      "difference",
+      "settlementAmountLabel",
       "issues",
       "period",
       "name",
@@ -615,21 +622,15 @@ function extractResult(input: unknown): CherryParseResult | null {
       return null;
     }
 
-    const reportedDifference = typeof input.difference === "number" && Number.isFinite(input.difference)
-      ? input.difference
-      : null;
-    const erpAmount = typeof input.erpAmount === "number" && Number.isFinite(input.erpAmount)
-      ? input.erpAmount
-      : null;
     const settlementAmount = typeof input.settlementAmount === "number" && Number.isFinite(input.settlementAmount)
       ? input.settlementAmount
       : null;
+    const settlementAmountLabel = extractTaskName(input.settlementAmountLabel);
     const name = extractTaskName(input.name);
     const period = extractPeriod(input);
     if (
-      reportedDifference === null
-      || erpAmount === null
-      || settlementAmount === null
+      settlementAmount === null
+      || !settlementAmountLabel
       || !name
       || !period
       || typeof input.issues !== "string"
@@ -637,33 +638,29 @@ function extractResult(input: unknown): CherryParseResult | null {
 
     const issueSummary = input.issues.trim();
     const rawAgentPayload = {
-      matched: input.matched,
-      erpAmount,
       settlementAmount,
-      difference: reportedDifference,
+      settlementAmountLabel,
       issues: input.issues,
       period,
       name,
     };
 
-    return finalizeAgentResult({
+    return {
       name,
-      matched: input.matched,
-      erpAmount,
       settlementAmount,
-      difference: reportedDifference,
+      settlementAmountLabel,
       issues: issueSummary
         ? [{
-            rowLabel: "疑似问题",
-            fieldName: "疑似问题",
-            differenceAmount: reportedDifference,
+            rowLabel: "结算单抽取提示",
+            fieldName: settlementAmountLabel,
+            settlementAmount,
             message: issueSummary,
             suggestion: null,
           }]
         : [],
       period,
       rawAgentPayload,
-    });
+    };
   }
 
   // 嵌套在 data / result / message.content / choices[0].message.content 里
@@ -704,24 +701,4 @@ function extractPeriod(input: Record<string, unknown>) {
   if (typeof input.period !== "string") return null;
   const normalized = input.period.trim();
   return /^\d{4}-(0[1-9]|1[0-2])$/.test(normalized) ? normalized : null;
-}
-
-function finalizeAgentResult(result: CherryParseResult): CherryParseResult | null {
-  const hasDifference = Math.abs(result.difference) > 0.005;
-  if (result.matched) {
-    return !hasDifference && result.issues.length === 0 ? result : null;
-  }
-  if (!hasDifference && result.issues.length === 0) return null;
-  if (result.issues.length > 0) return result;
-
-  return {
-    ...result,
-    issues: [{
-      rowLabel: "总差额",
-      fieldName: "ERP - 结算",
-      differenceAmount: result.difference,
-      message: `Agent 返回总差额 ${result.difference.toFixed(2)} 元，请结合原始资料核对`,
-      suggestion: "核对 ERP 与结算资料中的金额汇总及逐笔明细",
-    }],
-  };
 }

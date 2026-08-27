@@ -4,6 +4,8 @@ import { checkCherryStudioConnection } from "./lib/cherrystudio.js";
 import { config } from "./lib/config.js";
 import { larkConnectionStatus } from "./lib/lark-store.js";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler.js";
+import { batchesRouter } from "./routes/batches.js";
+import { erpRouter } from "./routes/erp.js";
 import { filesRouter } from "./routes/files.js";
 import { reviewItemsRouter } from "./routes/review-items.js";
 import { statisticsRouter } from "./routes/statistics.js";
@@ -39,9 +41,11 @@ async function main() {
     }
   });
 
+  app.use("/api/batches", batchesRouter);
   app.use("/api/tasks", tasksRouter);
   app.use("/api/tasks", reviewItemsRouter);
   app.use("/api/tasks", filesRouter);
+  app.use("/api/erp", erpRouter);
   app.use("/api/statistics", statisticsRouter);
   app.use(notFoundHandler);
   app.use(errorHandler);

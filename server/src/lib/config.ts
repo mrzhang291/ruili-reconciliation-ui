@@ -53,6 +53,7 @@ export const config = {
     knowledgeTableId: process.env.LARK_KNOWLEDGE_TABLE_ID || "tbliMWw8XUfbWmuX",
     taskTableId: process.env.LARK_TASK_TABLE_ID || "tblrpKbGxi38PnIU",
     reviewTableId: process.env.LARK_REVIEW_TABLE_ID || "tblrlpUs9nlY0dCW",
+    erpTableId: process.env.LARK_ERP_TABLE_ID || "tblx7K2MXNLintEO",
   },
   maxUploadBytes: 20 * 1024 * 1024, // 20 MB
 };

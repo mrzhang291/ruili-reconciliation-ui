@@ -2,15 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { projectRoot, relativeCliPath, runLarkCli } from "./lark-cli.js";
-import type { CherryIssue, CherryParseResult } from "./cherrystudio.js";
+import type { CherryIssue, ReconciliationResult } from "./cherrystudio.js";
 
 const taskFields = [
-  "任务ID", "任务名称", "商城名称", "账期", "结算文件", "ERP文件", "ERP金额", "结算金额", "Agent差额",
+  "任务ID", "任务名称", "店铺号", "账期", "结算文件", "ERP文件", "ERP金额", "结算金额", "Agent差额",
   "权威差额", "差额校验", "合理性校验", "状态", "处理批次ID", "使用规则版本", "Agent原始JSON",
   "失败原因", "取消原因", "开始时间", "完成时间", "提交人", "创建时间", "审核明细",
 ] as const;
 const reviewFields = [
-  "明细ID", "明细标题", "关联任务", "任务ID", "商城名称", "差异金额", "差异描述", "处理建议",
+  "明细ID", "明细标题", "关联任务", "任务ID", "店铺号", "差异金额", "差异描述", "处理建议",
   "审核结果", "审核备注", "审核人", "审核时间", "创建时间",
 ] as const;
 
@@ -47,7 +47,7 @@ export type StoredTask = {
   id: string;
   taskId: string;
   name: string | null;
-  mall: string | null;
+  shopNo: string | null;
   period: string | null;
   status: string;
   batchId: string | null;
@@ -74,7 +74,7 @@ export type StoredReviewItem = {
   id: string;
   title: string;
   taskId: string;
-  mall: string | null;
+  shopNo: string | null;
   differenceAmount: number | null;
   message: string;
   suggestion: string | null;
@@ -118,6 +118,10 @@ const asUser = (value: unknown) => {
   };
 };
 
+export function isLarkRecordId(recordId: string) {
+  return /^rec[A-Za-z0-9]{1,11}$/.test(recordId);
+}
+
 export function rowsFromPage(payload: PageEnvelope) {
   const page = payload.data;
   const fields = page?.fields ?? [];
@@ -134,7 +138,7 @@ function taskFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredTask {
     id: row.id,
     taskId: asText(value.任务ID) || row.id,
     name: asText(value.任务名称) || null,
-    mall: asText(value.商城名称) || null,
+    shopNo: asText(value.店铺号) || null,
     period: asText(value.账期) || null,
     status: baseToApiStatus[asSelect(value.状态)] ?? "FAILED",
     batchId: asText(value.处理批次ID) || null,
@@ -164,7 +168,7 @@ function reviewFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredRevi
     id: row.id,
     title: asText(value.明细标题) || asText(value.明细ID) || "差异明细",
     taskId: asText(value.任务ID),
-    mall: asText(value.商城名称) || null,
+    shopNo: asText(value.店铺号) || null,
     differenceAmount: asNumber(value.差异金额),
     message: asText(value.差异描述),
     suggestion: asText(value.处理建议) || null,
@@ -176,6 +180,7 @@ function reviewFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredRevi
 }
 
 async function recordGet(tableId: string, recordId: string, fields: readonly string[]) {
+  if (!isLarkRecordId(recordId)) return null;
   const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", tableId, "--record-id", recordId, "--format", "json", "--as", "user"];
   for (const field of fields) args.push("--field-id", field);
   return rowsFromPage(await runLarkCli<PageEnvelope>(args))[0] ?? null;
@@ -271,7 +276,7 @@ async function listPage(params: { offset: number; limit: number; statuses: strin
   const args = ["base", command, "--base-token", config.lark.baseToken, "--table-id", config.lark.taskTableId];
   if (params.keyword) {
     args.push("--keyword", params.keyword);
-    for (const field of ["任务ID", "任务名称", "商城名称", "账期"]) args.push("--search-field", field);
+    for (const field of ["任务ID", "任务名称", "店铺号", "账期"]) args.push("--search-field", field);
   }
   const filter = listFilter(params.statuses);
   if (filter) args.push("--filter-json", JSON.stringify(filter));
@@ -334,12 +339,12 @@ export async function listTaskRecords(params: { page: number; pageSize: number; 
 
 export async function createReviewRecords(task: StoredTask, issues: CherryIssue[]) {
   if (!issues.length) return [];
-  const fields = ["明细标题", "关联任务", "任务ID", "商城名称", "差异金额", "差异描述", "处理建议", "审核结果"];
+  const fields = ["明细标题", "关联任务", "任务ID", "店铺号", "差异金额", "差异描述", "处理建议", "审核结果"];
   const rows = issues.map((issue, index) => [
     asText(issue.rowLabel ?? issue.fieldName) || `第 ${index + 1} 条差异`,
     [{ id: task.id }],
     task.taskId,
-    task.mall ?? "",
+    task.shopNo ?? "",
     asNumber(issue.differenceAmount),
     asText(issue.message),
     asText(issue.suggestion),
@@ -362,12 +367,12 @@ export async function createReviewRecords(task: StoredTask, issues: CherryIssue[
   return [];
 }
 
-export async function applyTaskResult(recordId: string, batchId: string, result: CherryParseResult, ruleVersions: string[]) {
+export async function applyTaskResult(recordId: string, batchId: string, result: ReconciliationResult, ruleVersions: string[]) {
   const current = await getTaskRecord(recordId);
   if (!current || current.status !== "PROCESSING" || current.batchId !== batchId) return false;
   await updateTaskRecord(recordId, {
     任务名称: `${result.name} ${result.period}`,
-    商城名称: result.name,
+    店铺号: result.name,
     账期: result.period,
     ERP金额: result.erpAmount,
     结算金额: result.settlementAmount,
@@ -470,7 +475,7 @@ export async function larkConnectionStatus() {
 
 export function fileSummary(taskId: string, kind: "SETTLEMENT" | "ERP", attachment: Attachment | null) {
   const token = attachment?.file_token ?? attachment?.fileToken ?? attachment?.token ?? `${taskId}:${kind}`;
-  return { id: token, name: attachment?.name ?? (kind === "SETTLEMENT" ? "结算文件" : "ERP文件"), size: attachment?.size ?? 0 };
+  return { id: token, name: attachment?.name ?? (kind === "SETTLEMENT" ? "结算文件" : "飞书ERP明细表"), size: attachment?.size ?? 0 };
 }
 
 async function allTaskRecords() {

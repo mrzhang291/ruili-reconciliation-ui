@@ -1,8 +1,10 @@
-// 文件说明：开始对账页面，展示两份资料上传入口和提交按钮。
+// 文件说明：开始对账页面，展示结算资料上传入口和提交按钮。
 // 文件选择为本地表单状态；任务执行与处理日志由全局 ReconciliationTaskProvider 管理。
 import { useStartReconciliation } from "../hooks/use-start-reconciliation";
 import { useReconciliationTask } from "../hooks/ReconciliationTaskProvider";
 import {
+  erpFileAccept,
+  formatFileSize,
   reconciliationFileAccept,
   reconciliationFileHint,
 } from "../model/file-rules";
@@ -12,14 +14,15 @@ import { ProcessLogPanel } from "./ProcessLogPanel";
 export function StartView() {
   const {
     settlementFile,
-    erpFile,
+    taskErpFile,
     agentName,
     agentWorkspace,
     formError,
     setAgentName,
     setAgentWorkspace,
+    clearTaskErpFile,
     handleSettlementFileChange,
-    handleErpFileChange,
+    handleTaskErpFileChange,
   } = useStartReconciliation();
   const {
     running,
@@ -32,12 +35,13 @@ export function StartView() {
   } = useReconciliationTask();
 
   const hasAgentName = Boolean(agentName.trim());
-  const filesReady = Boolean(settlementFile && erpFile);
+  const filesReady = Boolean(settlementFile);
   const canStart = filesReady && hasAgentName;
 
   const handleSubmit = () => {
-    if (!settlementFile || !erpFile || !hasAgentName) return;
-    void startReconciliation({ settlementFile, erpFile, agentName, agentWorkspace });
+    if (!hasAgentName) return;
+    if (!settlementFile) return;
+    void startReconciliation({ settlementFile, erpFile: taskErpFile, agentName, agentWorkspace });
   };
 
   return (
@@ -46,7 +50,7 @@ export function StartView() {
         <div>
           <span className="eyebrow">NEW RECONCILIATION</span>
           <h1>发起一笔新对账</h1>
-          <p>分别导入渠道结算资料与 ERP 资料，CherryStudio agent 将完成内容识别、规则匹配与结果计算。</p>
+          <p>导入渠道结算资料；ERP 可用本次上传文件，未上传时由后端查询飞书明细表计算。</p>
         </div>
         <div className="security-note">
           <span aria-hidden="true">↗</span>
@@ -60,9 +64,9 @@ export function StartView() {
       <div className="flow-strip" aria-label="对账步骤">
         <div className="flow-item flow-item--active"><b>01</b><span>导入结算资料</span></div>
         <i />
-        <div className={settlementFile ? "flow-item flow-item--active" : "flow-item"}><b>02</b><span>导入 ERP 资料</span></div>
+        <div className={filesReady ? "flow-item flow-item--active" : "flow-item"}><b>02</b><span>确定 ERP 来源</span></div>
         <i />
-        <div className={settlementFile && erpFile ? "flow-item flow-item--active" : "flow-item"}><b>03</b><span>提交后端任务</span></div>
+        <div className={canStart ? "flow-item flow-item--active" : "flow-item"}><b>03</b><span>提交后端任务</span></div>
       </div>
 
       <section className="agent-selector" aria-labelledby="agent-selector-title">
@@ -108,23 +112,39 @@ export function StartView() {
           hint={reconciliationFileHint}
           onChange={handleSettlementFileChange}
         />
-        <FileCard
-          eyebrow="02"
-          title="导入 ERP 资料"
-          description="从 ERP 导出的表格、PDF 或业务截图资料"
-          file={erpFile}
-          accept={reconciliationFileAccept}
-          hint={reconciliationFileHint}
-          onChange={handleErpFileChange}
-        />
+        <div className="file-card file-card--ready" aria-label="ERP 来源">
+          <div className="file-card__head">
+            <span className="step-index">02</span>
+            <span className="file-state">{taskErpFile ? "已上传" : "总表检索"}</span>
+          </div>
+          <div className="file-icon" aria-hidden="true">{taskErpFile ? "XLS" : "✓"}</div>
+          <h3>ERP 来源</h3>
+          <p>上传本次 ERP Excel 时优先使用该文件；未上传时查询飞书 ERP 明细表。</p>
+          <div className="selected-file">
+            <div>
+              <strong>{taskErpFile?.name ?? "飞书 ERP 明细表"}</strong>
+              <span>{taskErpFile ? `${formatFileSize(taskErpFile.size)} · 本次任务文件` : "默认数据源：飞书多维表格"}</span>
+            </div>
+            <div className="file-inline-actions">
+              <label className="text-button">
+                {taskErpFile ? "更换文件" : "上传 ERP"}
+                <input type="file" accept={erpFileAccept} onChange={handleTaskErpFileChange} />
+              </label>
+              {taskErpFile && (
+                <button type="button" className="text-button" onClick={clearTaskErpFile}>用总表</button>
+              )}
+            </div>
+          </div>
+          <span className="file-hint">本次 ERP 文件只参与当前任务，不写入总表</span>
+        </div>
       </div>
 
       <section className="launch-bar">
         <div className="launch-copy">
           <span className={`readiness-dot ${canStart ? "ready" : ""}`} />
           <div>
-            <strong>{canStart ? "提交信息已准备完成" : filesReady ? "请填写 Agent 名称" : "请先导入两份资料"}</strong>
-            <small>{canStart ? "点击后仅创建服务端任务，处理过程将实时显示" : filesReady ? "Agent 名称是创建对账任务的必填参数" : "系统需要同时提交结算资料和 ERP 资料"}</small>
+            <strong>{canStart ? "提交信息已准备完成" : filesReady ? "请填写 Agent 名称" : "请先导入结算资料"}</strong>
+            <small>{canStart ? (taskErpFile ? "将优先使用本次 ERP 文件计算金额" : "未上传 ERP 时将查询飞书总表") : filesReady ? "Agent 名称是创建对账任务的必填参数" : "ERP 金额将由后端确定性计算"}</small>
           </div>
         </div>
         {running ? (

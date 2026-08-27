@@ -104,12 +104,201 @@ export type ReconciliationProgressListener = (log: ReconciliationProcessLog) => 
 
 export type CreateReconciliationTaskInput = {
   settlementFile: File;
-  erpFile: File;
+  erpFile?: File;
   agentSelector: {
     name: string;
     workspace?: string;
   };
   onProgress?: ReconciliationProgressListener;
+};
+
+export type CreateBatchReconciliationTasksInput = {
+  batchId: string;
+  onProgress?: ReconciliationProgressListener;
+};
+
+export type PrecheckBatchInput = {
+  settlementFiles: File[];
+  erpFile?: File;
+};
+
+export type BatchPrecheckItemStatus = "READY" | "NEEDS_REVIEW" | "REJECTED" | "DUPLICATE" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+
+export type BatchAmountCandidate = {
+  id: string;
+  label: string;
+  amount: number;
+  priority: number;
+  row: number;
+  column: number;
+};
+
+export type BatchPrecheckItem = {
+  documentId: string;
+  groupId: string | null;
+  version: number;
+  fileName: string;
+  sourceFileName: string | null;
+  size: number;
+  sha256: string | null;
+  shopCodes: string[];
+  shopNo: string | null;
+  period: string | null;
+  documentNo: string | null;
+  documentRange: string | null;
+  amountCandidateCount: number;
+  amountCandidates: BatchAmountCandidate[];
+  confirmedCandidateId: string | null;
+  confirmedSettlementAmount: number | null;
+  confirmedSettlementLabel: string | null;
+  erpRows: number | null;
+  erpSalesTotal: number | null;
+  status: BatchPrecheckItemStatus;
+  issues: string[];
+  taskId?: string | null;
+};
+
+export type BatchGroupSummary = {
+  id: string;
+  key: string;
+  shopNo: string;
+  period: string;
+  documentIds: string[];
+  documentCount: number;
+  status: BatchPrecheckItemStatus | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  taskId: string | null;
+  settlementAmount: number | null;
+  erpSalesTotal: number | null;
+  differenceAmount: number | null;
+  version: number;
+  issues: string[];
+};
+
+export type BatchPrecheckResult = {
+  batchId: string;
+  status: "DRAFT" | "READY" | "PROCESSING" | "NEEDS_REVIEW" | "COMPLETED" | "FAILED" | "CANCELLED";
+  totalFiles: number;
+  totalSize: number;
+  validFiles: number;
+  executableFiles: number;
+  executableGroups: number;
+  rejectedFiles: number;
+  duplicateFiles: number;
+  maxFiles: number;
+  maxTotalSize: number;
+  createdAt: string;
+  updatedAt: string;
+  groups: BatchGroupSummary[];
+  items: BatchPrecheckItem[];
+};
+
+export type BatchReconciliationTaskCreateItem = {
+  fileName: string;
+  groupId?: string;
+  taskId: string | null;
+  status: "PROCESSING" | "REJECTED" | "FAILED";
+  error: { code: string; message: string } | null;
+  logs: ReconciliationProcessLog[];
+};
+
+export type BatchReconciliationTaskCreateResult = {
+  batchId?: string;
+  total: number;
+  created: number;
+  rejected: number;
+  failed: number;
+  items: BatchReconciliationTaskCreateItem[];
+};
+
+export type UpdateBatchDocumentIdentityInput = {
+  shopNo?: string;
+  period?: string;
+};
+
+export type SelectBatchDocumentAmountInput = {
+  candidateId?: string;
+  amount?: number;
+  label?: string;
+};
+
+export type ErpImportMode = "preview" | "append" | "replace";
+
+export type ErpSortField = "month" | "shopNo" | "deductionRate" | "salesAmount";
+export type ErpSortDirection = "asc" | "desc";
+
+export type ErpRecord = {
+  id: string;
+  shopNo: string;
+  deductionRate: number;
+  salesAmount: number;
+  month: string;
+};
+
+export type ErpRecordInput = Omit<ErpRecord, "id">;
+
+export type ListErpRecordsParams = {
+  page?: number;
+  pageSize?: number;
+  month?: string;
+  shopNo?: string;
+  keyword?: string;
+  sortField?: ErpSortField;
+  sortDirection?: ErpSortDirection;
+};
+
+export type PaginatedErpRecords = {
+  items: ErpRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
+
+export type ErpFilterOptions = {
+  months: string[];
+};
+
+export type ErpImportMonthSummary = {
+  month: string;
+  rows: number;
+  salesTotal: number;
+  netSalesTotal: number;
+  existingRows: number;
+  deletedRows: number;
+  createdRows: number;
+  updatedRows: number;
+  sampleRows: Array<{
+    shopNo: string;
+    deductionRate: number;
+    salesAmount: number;
+    month: string;
+    sourceRow?: number;
+  }>;
+};
+
+export type ErpImportResult = {
+  mode: ErpImportMode;
+  fileName: string;
+  months: ErpImportMonthSummary[];
+  totalRows: number;
+  written: boolean;
+  failedRows: Array<{ row: number; reason: string }>;
+};
+
+export type ImportErpFileInput = {
+  file: File;
+  mode: ErpImportMode;
+  month?: string;
+};
+
+export type BatchUpdateErpRecordsInput = Array<{ id: string; values: ErpRecordInput }>;
+
+export type BatchUpdateErpRecordsResult = {
+  items: Array<{
+    id: string;
+    success: boolean;
+    record: ErpRecord | null;
+    error: string | null;
+  }>;
 };
 
 export type ListReconciliationTasksParams = {
