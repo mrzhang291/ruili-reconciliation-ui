@@ -335,6 +335,47 @@ test("allows matched non-positive sales totals when the sales basis ties out", (
   assert.deepEqual(result?.issues, []);
 });
 
+test("suppresses non-actionable Agent review text when negative sales totals tie out", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: -584,
+    settlementAmountLabel: "合并本期实销金额",
+    salesTotal: -584,
+    netSalesTotal: -513.92,
+    erpBasis: "sales_total",
+    erpAmount: -584,
+    difference: 0,
+    matched: false,
+    basisReason: "两份同店同账期结算单合计本期实销金额为-584.00，属于扣点前销售口径；ERP sales_total为-584.00。",
+    issues: "本次为负数退货/冲销调整场景，第二份文件本期实销及含税结账金额均为0但产生手续费扣款，不能仅因ERP销售额对平而自动一致。ERP sales_total=-584.00，net_sales_total=-513.92；两份合计含税结账金额=-522.68，最终应付款约=-617.10，相关负数销售、扣款及付款差异需人工复核。",
+  })));
+
+  assert.equal(result?.matched, true);
+  assert.equal(result?.difference, 0);
+  assert.deepEqual(result?.issues, []);
+  assert.equal(result?.rawAgentPayload.suppressedAgentIssue, true);
+});
+
+test("keeps scope mismatch in review even when the selected sales difference is small", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 98794.47,
+    settlementAmountLabel: "本期实销金额合计",
+    salesTotal: 98768.85,
+    netSalesTotal: 88204.28,
+    erpBasis: "sales_total",
+    erpAmount: 98768.85,
+    difference: -25.62,
+    matched: false,
+    basisReason: "两份结算单合计字段为本期实销金额，属于扣点前销售额口径。",
+    issues: "两份结算单仅涉及扣率8%和12%的合同，而ERP返回还包含扣率8.5%和7.5%的明细，结算单范围与ERP聚合范围不一致，范围不可比。",
+  })));
+
+  assert.equal(result?.matched, false);
+  assert.equal(result?.issues.length, 1);
+  assert.equal(result?.issues[0].differenceAmount, null);
+  assert.match(result?.issues[0].message ?? "", /范围不可比/);
+  assert.equal(result?.rawAgentPayload.suppressedAgentIssue, false);
+});
+
 test("keeps invoice labels on net_sales_total even when sales_total is closer", () => {
   const result = parseAgentResponse(JSON.stringify(contractResult({
     settlementAmount: 270991.7,

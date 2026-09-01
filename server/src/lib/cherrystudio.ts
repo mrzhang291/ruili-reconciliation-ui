@@ -755,7 +755,6 @@ function extractResult(input: unknown): CherryParseResult | null {
     });
     if (!checked) return null;
 
-    const issueSummary = input.issues.trim();
     const rawAgentPayload = {
       settlementAmount,
       settlementAmountLabel,
@@ -778,8 +777,10 @@ function extractResult(input: unknown): CherryParseResult | null {
       salesDifference: checked.salesDifference,
       netSalesDifference: checked.netSalesDifference,
       scopedErpMismatch: checked.scopedErpMismatch,
+      suppressedAgentIssue: checked.suppressedAgentIssue,
       reviewThresholdAmount: reconciliationReviewThresholdAmount,
     };
+    const issueSummary = checked.suppressedAgentIssue ? "" : input.issues.trim();
     const issues: CherryIssue[] = [];
     if (issueSummary || checked.reviewMessages.length) {
       const backendMessage = checked.reviewMessages.length
@@ -923,18 +924,21 @@ function validateAgentArithmetic(payload: AgentReconciliationPayload) {
       ? `ERP/结算单当前口径或范围不可比，直接相减为 ${selected.difference.toFixed(2)} 元；该数仅用于定位问题，不作为可结算差额。`
       : `所选口径差额 ${selected.difference.toFixed(2)} 元，超过 ${reconciliationReviewThresholdAmount.toFixed(2)} 元阈值。`);
   }
-  if (!payload.matched && !reviewMessages.length) {
+  const amountTiesOut = Math.abs(selected.differenceCents) <= thresholdCents;
+  const suppressedAgentIssue = amountTiesOut && isNonActionableSalesTieOutIssue(payload, selected.basis, scopedErpMismatch);
+  if (!payload.matched && !reviewMessages.length && !suppressedAgentIssue && !amountTiesOut) {
     reviewMessages.push("Agent 标记本次对账未一致。");
   }
 
   return {
     ...selected,
-    matched: payload.matched && reviewMessages.length === 0 && Math.abs(selected.differenceCents) <= thresholdCents,
+    matched: reviewMessages.length === 0 && amountTiesOut && (payload.matched || suppressedAgentIssue || !payload.issues.trim()),
     closestBasis: closest.basis,
     salesDifference: options[0].difference,
     netSalesDifference: options[1].difference,
     reviewMessages,
     scopedErpMismatch,
+    suppressedAgentIssue,
     declaredBasis: declared.basis,
     basisCorrectionReason: basisCorrection ? reviewMessages[0] : null,
   };
@@ -973,6 +977,16 @@ function isZeroSalesFeeStatement(payload: AgentReconciliationPayload, preferredB
   const evidence = `${payload.settlementAmountLabel} ${payload.basisReason} ${payload.issues}`.normalize("NFKC");
   return /(?:销售(?:金额|额|数量)?(?:为|是)?0|0(?:元)?销售|零销售|无销售)/.test(evidence)
     && /(?:费用|扣款|扣减|佣金|开票|发票|应付小写|补扣|调整)/.test(evidence);
+}
+
+function isNonActionableSalesTieOutIssue(payload: AgentReconciliationPayload, selectedBasis: Exclude<AgentErpBasis, "ambiguous">, scopedErpMismatch: boolean) {
+  if (scopedErpMismatch || selectedBasis !== "sales_total") return false;
+  if (preferredBasisFromSettlementLabel(payload) !== "sales_total") return false;
+  const issue = payload.issues.normalize("NFKC").replace(/\s+/g, "");
+  if (!issue) return !payload.matched;
+  const explainsOnlyDeductions = /(?:负数|退货|退款|冲销|冲减|费用|扣款|扣减|手续费|快递费|应付款|付款|含税结账|扣点|扣点后|net_sales_total)/i.test(issue);
+  const blocksSettlement = /(?:范围不可比|聚合范围|范围.*(?:不一致|冲突|缺口)|口径.*(?:不一致|冲突|无法)|无法(?:唯一)?确定对账口径|ERP.*(?:未找到|缺失|无匹配)|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致)/.test(issue);
+  return explainsOnlyDeductions && !blocksSettlement;
 }
 
 function formatBackendReviewMessage(
