@@ -2,6 +2,8 @@ import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
 import { config } from "../lib/config.js";
+import { buildErpLookupKeys } from "../lib/erp-base-query.js";
+import { extractPeriodFromFileName } from "../lib/excel-settlement.js";
 import { normalizeFileName } from "../lib/file-storage.js";
 import { settlementFileRejectionReason } from "../lib/settlement-file-rules.js";
 import {
@@ -31,11 +33,6 @@ const settlementMimeTypes = new Set([
   "image/png",
   "image/jpeg",
 ]);
-const excelExtensions = new Set([".xlsx", ".xls"]);
-const excelMimeTypes = new Set([
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-excel",
-]);
 
 type UploadError = { code: string; message: string };
 
@@ -52,16 +49,6 @@ function validateSettlementUpload(file: Express.Multer.File): UploadError | null
 
   const rejectedReason = settlementFileRejectionReason(fileName);
   if (rejectedReason) return { code: "NOT_SETTLEMENT_FILE", message: rejectedReason };
-  return null;
-}
-
-function validateErpUpload(file: Express.Multer.File | undefined): UploadError | null {
-  if (!file) return null;
-  const fileName = normalizeFileName(file.originalname);
-  if (!excelExtensions.has(path.extname(fileName).toLowerCase())
-    || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !excelMimeTypes.has(file.mimetype))) {
-    return { code: "INVALID_ERP_FILE_TYPE", message: "ERP 文件仅支持 Excel" };
-  }
   return null;
 }
 
@@ -88,23 +75,32 @@ tasksRouter.post("/", upload.fields([
     if (!settlement) {
       return res.status(400).json(errorPayload({ code: "MISSING_FILES", message: "需要上传结算资料" }));
     }
+    if (erp) {
+      return res.status(400).json(errorPayload({
+        code: "ERP_FILE_NOT_ALLOWED",
+        message: "单次对账不再接收 ERP 文件，ERP/DRP 金额由 Agent 通过 MCP 查询",
+      }));
+    }
 
     const settlementError = validateSettlementUpload(settlement);
     if (settlementError) return res.status(400).json(errorPayload(settlementError));
-
-    const erpError = validateErpUpload(erp);
-    if (erpError) return res.status(400).json(errorPayload(erpError));
 
     const agentSelector = parseAgentSelector(req.body);
     if ("code" in agentSelector) {
       return res.status(400).json(errorPayload(agentSelector));
     }
+    const settlementFileName = normalizeFileName(settlement.originalname);
+    const shopCodes = buildErpLookupKeys(settlementFileName);
 
     const logs: ProgressLog[] = [];
     const task = await createReconciliationTask({
       settlementFile: toCreateTaskFile(settlement),
-      erpFile: erp ? toCreateTaskFile(erp) : undefined,
       agentSelector,
+      settlementHint: {
+        name: shopCodes.length === 1 ? shopCodes[0] : undefined,
+        period: extractPeriodFromFileName(settlementFileName) ?? undefined,
+        documentLabel: settlementFileName,
+      },
       onProgress: (log) => logs.push(log),
     });
     return res.status(202).json({ data: { taskId: task.id, status: task.status, logs }, requestId: crypto.randomUUID() });
@@ -210,10 +206,28 @@ export function toSummary(task: StoredTask) {
       settlementAmount: task.settlementAmount?.toString() ?? null,
       erpAmount: task.erpAmount?.toString() ?? null,
       differenceAmount: task.differenceAmount?.toString() ?? null,
+      scopeMismatch: isScopeMismatchTask(task),
     },
     createdAt: task.createdAt, completedAt: task.completedAt, createdBy: task.createdBy,
   };
 }
+
+function isScopeMismatchTask(task: StoredTask) {
+  if (!task.rawAgentJson) return false;
+  try {
+    const payload = JSON.parse(task.rawAgentJson) as Record<string, unknown>;
+    return payload.scopedErpMismatch === true || isScopeMismatchText(String(payload.issues ?? ""));
+  } catch {
+    return false;
+  }
+}
+
+function isScopeMismatchText(value: string) {
+  const text = value.normalize("NFKC").replace(/\s+/g, "");
+  return scopedMismatchPattern.test(text);
+}
+
+const scopedMismatchPattern = /聚合范围与结算单范围不一致|不能将ERP店铺聚合金额直接视为普通差额|ERP全店汇总|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致|(?:预览页面|请勿用来结算)|(?:账期|期间|月份).*?(?:不一致|冲突)|(?:文件名主体|正文主体|结算主体|主体名称).*?(?:不一致|冲突)|(?:字段)?口径.*?(?:不一致|冲突)|无法唯一确定对账口径|金额接近度与字段口径存在冲突|结算单扣率.*?ERP.*?扣率|ERP.*?扣率.*?结算单扣率|ERP.*(?:聚合|汇总|店铺号|店铺|同店|同一店铺|多条|多档|不同扣率).*?(?:范围|不可比|无法确认|无法对应|不能直接|明细范围|合同|专柜|铺位|活动|特卖|本结算单|单一|部分|仅覆盖|未覆盖|口径)|(?:单一合同|单一专柜|单一结算部门|单一客户合同|仅覆盖|仅列示|仅显示).*?ERP/;
 
 export function toDetail(task: StoredTask, reviewItems: StoredReviewItem[]) {
   return {

@@ -3,13 +3,12 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { reconciliationApi, ReconciliationApiError } from "../api";
-import { validateErpFile, validateReconciliationFile } from "../model/file-rules";
+import { validateReconciliationFile } from "../model/file-rules";
 import type { ReconciliationProcessLog, ReconciliationTaskSummary } from "../model/types";
 import { requestErrorMessage } from "../model/view-model";
 
 export type StartReconciliationInput = {
   settlementFile: File;
-  erpFile?: File | null;
   agentName: string;
   agentWorkspace: string;
 };
@@ -197,11 +196,6 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
       setError(validationError);
       return;
     }
-    const erpValidationError = input.erpFile ? validateErpFile(input.erpFile) : "";
-    if (erpValidationError) {
-      setError(erpValidationError);
-      return;
-    }
     const agentName = input.agentName.trim();
     if (!agentName) {
       setError("请填写 Agent 名称");
@@ -216,7 +210,6 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
     try {
       const task = await reconciliationApi.createTask({
         settlementFile: input.settlementFile,
-        erpFile: input.erpFile ?? undefined,
         agentSelector: {
           name: agentName,
           workspace: input.agentWorkspace.trim() || undefined,

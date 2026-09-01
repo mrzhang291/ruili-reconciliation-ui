@@ -4,6 +4,7 @@ import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
 import { config } from "../lib/config.js";
+import { ErpBaseQueryError, queryErpReconciliationData } from "../lib/erp-base-query.js";
 import { ErpImportError, importErpWorkbook, type ErpImportMode } from "../lib/erp-import.js";
 import { invalidateReadCache } from "../lib/read-cache.js";
 import {
@@ -51,6 +52,32 @@ erpRouter.get("/options", async (_req, res, next) => {
   try {
     return res.json({ data: await getErpFilterOptions(), requestId: crypto.randomUUID() });
   } catch (error) {
+    next(error);
+  }
+});
+
+erpRouter.get("/reconciliation", async (req, res, next) => {
+  try {
+    const lookupKey = firstText(req.query.mall_name, req.query.mallName, req.query.storeCode, req.query.shopNo, req.query.name);
+    const period = firstText(req.query.period, req.query.month, periodFromDate(req.query.periodStart));
+    if (!lookupKey || !period) {
+      return res.status(400).json({
+        error: {
+          code: "ERP_RECONCILIATION_QUERY_REQUIRED",
+          message: "需要提供 mall_name/shopNo/storeCode 与 period",
+          requestId: crypto.randomUUID(),
+        },
+      });
+    }
+
+    const data = await queryErpReconciliationData(lookupKey, period);
+    return res.json({ data: reconciliationPayload(data), requestId: crypto.randomUUID() });
+  } catch (error) {
+    if (error instanceof ErpBaseQueryError) {
+      return res.status(error.code === "ERP_ROWS_NOT_FOUND" ? 404 : 400).json({
+        error: { code: error.code, message: error.message, requestId: crypto.randomUUID() },
+      });
+    }
     next(error);
   }
 });
@@ -148,4 +175,47 @@ function parseMode(value: unknown): ErpImportMode | null {
 
 function textQuery(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function periodFromDate(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const match = value.trim().match(/^(20\d{2})-(0[1-9]|1[0-2])(?:-\d{2})?$/);
+  return match ? `${match[1]}-${match[2]}` : undefined;
+}
+
+function reconciliationPayload(data: Awaited<ReturnType<typeof queryErpReconciliationData>>) {
+  const rows = data.rows.map((row) => ({
+    id: row.id,
+    shopNo: row.shopNo,
+    shop_no: row.shopNo,
+    deductionRate: row.deductionRate,
+    deduction_rate: row.deductionRate,
+    salesAmount: row.salesAmount,
+    sales_amount: row.salesAmount,
+    month: row.month,
+  }));
+  return {
+    lookupKey: data.lookupKey,
+    lookup_key: data.lookupKey,
+    mallName: data.lookupKey,
+    mall_name: data.lookupKey,
+    storeCode: data.lookupKey,
+    store_code: data.lookupKey,
+    period: data.period,
+    month: data.month,
+    rows,
+    rowsCount: rows.length,
+    rows_count: rows.length,
+    salesTotal: data.salesTotal,
+    sales_total: data.salesTotal,
+    netSalesTotal: data.netSalesTotal,
+    net_sales_total: data.netSalesTotal,
+  };
 }

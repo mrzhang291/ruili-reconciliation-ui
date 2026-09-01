@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildExcelSettlementExtraction,
   chooseExcelSettlementCandidate,
+  extractPeriodFromFileName,
   extractPeriodFromRows,
   extractSettlementCandidates,
 } from "../dist/lib/excel-settlement.js";
@@ -28,7 +29,18 @@ test("extracts settlement period without treating amounts as YYYYMM", () => {
     ["结算起止日期：2026-05-01 至 2026-05-31"],
     ["销售金额", "2001043.00"],
   ]), "2026-05");
+  assert.equal(extractPeriodFromRows("NBSC25-2.xls", [
+    ["结算起止日期", "2026-05-01", "至", "2026-05-31"],
+    ["合同期", "2022-06-01 至 2029-12-31"],
+  ]), "2026-05");
+  assert.equal(extractPeriodFromRows("NBSC25-2.xls", [
+    ["结算起止日期", "46143.0", "至", "46173.0"],
+    ["合同期", "2022-06-01 至 2029-12-31"],
+  ]), null);
   assert.equal(extractPeriodFromRows("SHNKA2结算单-202605.pdf", []), "2026-05");
+  const currentYear = new Date().getFullYear();
+  assert.equal(extractPeriodFromFileName("WHAD28-5月结算单1.pdf"), `${currentYear}-05`);
+  assert.equal(extractPeriodFromFileName("WHAD30 -5月结算单2.pdf"), `${currentYear}-05`);
 });
 
 test("chooses only a unique net settlement amount without ERP proximity", () => {
@@ -49,7 +61,7 @@ test("chooses only a unique net settlement amount without ERP proximity", () => 
   assert.equal(chooseExcelSettlementCandidate(ambiguous), null);
 });
 
-test("builds the five-field extraction result from a chosen Excel candidate", () => {
+test("builds a settlement extraction result from a chosen Excel candidate", () => {
   const extraction = buildExcelSettlementExtraction({
     name: "NBAD78",
     period: "2026-05",
@@ -66,5 +78,7 @@ test("builds the five-field extraction result from a chosen Excel candidate", ()
   assert.equal(extraction.period, "2026-05");
   assert.equal(extraction.settlementAmount, 1677854.64);
   assert.equal(extraction.settlementAmountLabel, "结算净营业额");
+  assert.equal(extraction.erpBasis, "ambiguous");
+  assert.match(extraction.basisReason, /本地 Excel 快速抽取/);
   assert.deepEqual(extraction.issues, []);
 });

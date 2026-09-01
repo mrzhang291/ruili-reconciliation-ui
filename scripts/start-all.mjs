@@ -155,6 +155,34 @@ function stopPort(port) {
   }
 }
 
+function stopStaleBackendProcesses() {
+  if (process.platform !== "win32") return;
+  try {
+    const script = [
+      "$root = $env:BILLCOMPARE_ROOT",
+      "$self = [int]$env:BILLCOMPARE_SELF_PID",
+      "Get-CimInstance Win32_Process -Filter \"name = 'node.exe'\" |",
+      "  Where-Object { $_.ProcessId -ne $self -and $_.CommandLine -like \"*$root*\" -and ($_.CommandLine -like '*server*tsx*watch src/index.ts*' -or $_.CommandLine -like '*server*dist*index.js*') } |",
+      "  Select-Object -ExpandProperty ProcessId",
+    ].join("\n");
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, BILLCOMPARE_ROOT: ROOT, BILLCOMPARE_SELF_PID: String(process.pid) },
+    });
+    for (const pid of output.split(/\s+/).filter(Boolean)) {
+      try {
+        execFileSync("taskkill", ["/PID", pid, "/T", "/F"], { stdio: "ignore" });
+        log(`已清理旧后端进程 ${pid}`);
+      } catch {
+        // 进程可能已退出。
+      }
+    }
+  } catch {
+    // 清理失败不阻塞启动，端口清理仍会兜底。
+  }
+}
+
 function runtimeLog(name) { mkdirSync(LOG_DIR, { recursive: true }); return path.join(LOG_DIR, name); }
 function spawnBackground(command, args, options, logPath) {
   const output = openSync(logPath, "a");
@@ -179,11 +207,14 @@ export async function backendHealthy(port) {
 
 export async function ensureBackend(settings, cherryApiKey) {
   if (!cherryApiKey) return false;
-  if (RESTART) stopPort(settings.backendPort);
+  if (RESTART) {
+    stopStaleBackendProcesses();
+    stopPort(settings.backendPort);
+  }
   if (await portOpen(settings.backendPort)) return backendHealthy(settings.backendPort);
   const logPath = runtimeLog("backend.log");
-  const tsx = path.join(SERVER_DIR, "node_modules", "tsx", "dist", "cli.mjs");
-  spawnBackground(process.execPath, [tsx, "watch", "src/index.ts"], {
+  runNpm(["run", "build"], SERVER_DIR, { ...process.env, CHERRYSTUDIO_API_KEY: cherryApiKey });
+  spawnBackground(process.execPath, [path.join(SERVER_DIR, "dist", "index.js")], {
     cwd: SERVER_DIR, env: { ...process.env, CHERRYSTUDIO_API_KEY: cherryApiKey },
   }, logPath);
   for (let attempt = 0; attempt < 25; attempt += 1) {

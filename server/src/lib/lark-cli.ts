@@ -8,6 +8,7 @@ import { config } from "./config.js";
 const execFileAsync = promisify(execFile);
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const retryDelaysMs = [800, 1_600, 3_200];
+const retryableErrorPattern = /limited|rate limit|frequency limit|server time out|timed? out|timeout|econnreset|etimedout|eai_again|502|503|504|bad gateway|gateway timeout|internal server error/i;
 
 export class LarkCliError extends Error {
   constructor(message: string, readonly code = "LARK_CLI_ERROR") {
@@ -38,6 +39,10 @@ function errorDetail(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function isRetryableLarkCliError(detail: string) {
+  return retryableErrorPattern.test(detail);
+}
+
 export async function runLarkCli<T = Record<string, unknown>>(args: string[], cwd = projectRoot): Promise<T> {
   const { command, prefix } = resolveCliEntry();
   for (let attempt = 0; ; attempt += 1) {
@@ -58,7 +63,7 @@ export async function runLarkCli<T = Record<string, unknown>>(args: string[], cw
       return payload;
     } catch (error) {
       const detail = error instanceof LarkCliError ? error.message : errorDetail(error);
-      if (attempt < retryDelaysMs.length && /limited|rate limit/i.test(detail)) {
+      if (attempt < retryDelaysMs.length && isRetryableLarkCliError(detail)) {
         await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
         continue;
       }

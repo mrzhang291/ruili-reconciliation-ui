@@ -36,9 +36,9 @@
 1. 前端通过 `POST /api/tasks` 上传结算资料，可选上传本次 ERP Excel。
 2. 本机兼容接口在飞书任务表创建记录，并上传结算单附件。
 3. 每次任务从飞书知识规则表读取快照，再创建独立 CherryStudio Session。
-4. Agent 只返回结算单抽取 JSON：`settlementAmount`、`settlementAmountLabel`、`issues`、`period`、`name`，其中 `name` 必须优先输出店铺号。
-5. 后端优先从本次 ERP Excel 查询 `店铺号 + period`；未上传时查飞书 ERP 明细表，汇总扣点前/扣点后销售额，并固定用扣点前 `ERP销售额` 写入 `ERP金额`。
-6. 金额写入飞书后，由飞书公式字段计算权威差额并校验差额；有差异时写入审核明细表。
+4. Agent 只返回结算单抽取 JSON：`settlementAmount`、`settlementAmountLabel`、`erpBasis`、`basisReason`、`issues`、`period`、`name`，其中 `name` 必须优先输出店铺号，`erpBasis` 只能表示扣点前、扣点后或无法判断。
+5. 后端优先从本次 ERP Excel 查询 `店铺号 + period`；未上传时查飞书 ERP 明细表，汇总扣点前/扣点后销售额。Agent 根据店铺规则判断本次采用 `ERP销售额` 还是 `ERP扣点后金额`，后端按该口径写入 `ERP金额` 并保留双口径差额。
+6. 金额写入飞书后，由飞书公式字段计算权威差额并校验差额；差额超过 200 元、口径无法判断或存在疑点时写入审核明细表。
 7. 列表、详情、统计、审核、下载和删除操作均以飞书 Base 为数据源。
 
 ## 批量对账

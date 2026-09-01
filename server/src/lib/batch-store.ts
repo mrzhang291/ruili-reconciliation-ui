@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
-import { extractShopCodesFromFileName, queryErpReconciliationData } from "./erp-base-query.js";
+import { extractShopCodesFromFileName } from "./erp-base-query.js";
 import { normalizeFileName, type StoredFile } from "./file-storage.js";
 import { findCreatedRecordId, formatDateTime, rowsFromPage } from "./lark-store.js";
 import { projectRoot, relativeCliPath, runLarkCli } from "./lark-cli.js";
@@ -52,8 +52,15 @@ export type BatchDocumentState = {
   confirmedCandidateId: string | null;
   confirmedSettlementAmount: number | null;
   confirmedSettlementLabel: string | null;
+  salesSettlementAmount?: number | null;
+  salesSettlementLabel?: string | null;
+  groupSettlementAmount?: number | null;
+  groupSettlementLabel?: string | null;
+  groupErpSalesTotal?: number | null;
   erpRows: number | null;
   erpSalesTotal: number | null;
+  erpRawSalesTotal?: number | null;
+  erpRawNetSalesTotal?: number | null;
   groupId: string | null;
   taskId: string | null;
   status: BatchDocumentStatus;
@@ -94,6 +101,16 @@ export type BatchState = {
   updatedAt: string;
 };
 
+export type BatchExecutionGroup = {
+  id: string;
+  groupId: string | null;
+  documentIds: string[];
+  documentCount: number;
+  shopNo: string | null;
+  period: string | null;
+  fileName: string;
+};
+
 type TableEnvelope = {
   ok?: boolean;
   data?: { tables?: Array<{ id?: string; name?: string }> };
@@ -124,6 +141,7 @@ type FieldSpec = {
 
 const batchTableName = "批处理汇总表";
 const documentTableName = "批量结算单明细表";
+const batchAutoMatchThresholdCents = 20_000;
 
 const batchFields: FieldSpec[] = [
   { name: "批处理ID", type: "text" },
@@ -174,6 +192,7 @@ const documentFields: FieldSpec[] = [
 ];
 
 let tablePromise: Promise<{ batchTableId: string; documentTableId: string }> | null = null;
+let batchSyncChain: Promise<void> = Promise.resolve();
 
 function batchRoot() {
   return path.join(projectRoot, ".runtime", "batches");
@@ -368,27 +387,75 @@ function asDate(value: string | null | undefined) {
 
 function countDocuments(state: BatchState) {
   const valid = state.documents.filter((doc) => doc.status !== "REJECTED" && doc.status !== "DUPLICATE");
-  const readyGroups = state.groups.filter((group) => group.status === "READY").length;
+  const executionGroups = buildBatchExecutionGroups(state);
+  const pending = state.documents.filter((doc) => doc.status === "READY" || doc.status === "PROCESSING").length;
   const needsReview = state.documents.filter((doc) => doc.status === "NEEDS_REVIEW").length;
   const succeeded = state.documents.filter((doc) => doc.status === "SUCCEEDED").length;
   const failed = state.documents.filter((doc) => doc.status === "FAILED").length;
   const cancelled = state.documents.filter((doc) => doc.status === "CANCELLED").length;
+  const groupedDocumentIds = new Set(state.groups
+    .filter((group) => group.documentCount > 1 && Number.isFinite(group.settlementAmount))
+    .flatMap((group) => group.documentIds));
+  const settlementTotal = [
+    ...state.groups
+      .filter((group) => group.documentCount > 1 && Number.isFinite(group.settlementAmount))
+      .map((group) => group.settlementAmount ?? 0),
+    ...valid
+      .filter((doc) => !groupedDocumentIds.has(doc.id))
+      .map((doc) => doc.confirmedSettlementAmount ?? 0),
+  ].reduce((sum, amount) => sum + amount, 0);
   return {
     valid: valid.length,
-    readyGroups,
+    readyGroups: executionGroups.length,
+    pending,
     needsReview,
     succeeded,
     failed,
     cancelled,
     splitCount: state.documents.filter((doc) => doc.sourceFileName).length,
-    settlementTotal: valid.reduce((sum, doc) => sum + (doc.confirmedSettlementAmount ?? 0), 0),
+    settlementTotal,
   };
 }
 
 function isExecutableDocument(document: BatchDocumentState) {
   return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(document.status)
-    && !document.taskId
-    && Boolean(document.shopNo);
+    && !document.taskId;
+}
+
+export function buildBatchExecutionGroups(state: BatchState): BatchExecutionGroup[] {
+  const documentsById = new Map(state.documents.map((document) => [document.id, document]));
+  const usedDocumentIds = new Set<string>();
+  const units: BatchExecutionGroup[] = [];
+
+  for (const group of state.groups) {
+    const documents = group.documentIds.map((id) => documentsById.get(id)).filter((document): document is BatchDocumentState => Boolean(document));
+    if (documents.length <= 1 || !documents.every(isExecutableDocument)) continue;
+    for (const document of documents) usedDocumentIds.add(document.id);
+    units.push({
+      id: group.id,
+      groupId: group.id,
+      documentIds: documents.map((document) => document.id),
+      documentCount: documents.length,
+      shopNo: group.shopNo,
+      period: group.period,
+      fileName: `${group.shopNo} ${group.period} 合并结算单（${documents.length}份）`,
+    });
+  }
+
+  for (const document of state.documents) {
+    if (usedDocumentIds.has(document.id) || !isExecutableDocument(document)) continue;
+    units.push({
+      id: document.id,
+      groupId: document.groupId,
+      documentIds: [document.id],
+      documentCount: 1,
+      shopNo: document.shopNo,
+      period: document.period,
+      fileName: document.fileName,
+    });
+  }
+
+  return units;
 }
 
 function batchRecordValues(state: BatchState) {
@@ -399,9 +466,9 @@ function batchRecordValues(state: BatchState) {
     总文件数: state.totalFiles,
     有效单据数: counts.valid,
     可执行组数: counts.readyGroups,
-    待处理数: counts.needsReview,
+    待处理数: counts.pending,
     成功数: counts.succeeded,
-    待审核数: state.documents.filter((doc) => doc.status === "READY" && doc.issues.length).length,
+    待审核数: counts.needsReview,
     失败数: counts.failed,
     取消数: counts.cancelled,
     拆单数: counts.splitCount,
@@ -443,6 +510,11 @@ function documentRecordValues(document: BatchDocumentState) {
         row: candidate.row,
         column: candidate.column,
       })),
+      groupResult: {
+        settlementAmount: document.groupSettlementAmount ?? null,
+        settlementLabel: document.groupSettlementLabel ?? null,
+        erpSalesTotal: document.groupErpSalesTotal ?? null,
+      },
     }),
     Session信息: document.taskId ? `task=${document.taskId}` : null,
     重试次数: 0,
@@ -452,6 +524,7 @@ function documentRecordValues(document: BatchDocumentState) {
 }
 
 export function rebuildBatchGroups(state: BatchState) {
+  const now = new Date().toISOString();
   const groups = new Map<string, BatchDocumentState[]>();
   for (const document of state.documents) {
     if (document.status === "REJECTED" || document.status === "DUPLICATE") {
@@ -479,10 +552,27 @@ export function rebuildBatchGroups(state: BatchState) {
           : statuses.includes("NEEDS_REVIEW") ? "NEEDS_REVIEW"
             : statuses.every((item) => item === "SUCCEEDED") ? "SUCCEEDED"
               : "READY";
-    const settlementAmount = documents.every((doc) => Number.isFinite(doc.confirmedSettlementAmount))
-      ? documents.reduce((sum, doc) => sum + (doc.confirmedSettlementAmount ?? 0), 0)
-      : null;
-    const erpSalesTotal = documents[0]?.erpSalesTotal ?? null;
+    const groupResult = resolveCombinedTaskGroupResult(documents);
+    const splitSalesMatch = groupResult ? null : resolveSplitSalesGroupMatch(documents);
+    const settlementAmount = groupResult?.settlementAmount ?? splitSalesMatch?.settlementAmount ?? (documents.every((doc) => Number.isFinite(doc.confirmedSettlementAmount))
+      ? roundMoney(documents.reduce((sum, doc) => sum + (doc.confirmedSettlementAmount ?? 0), 0))
+      : null);
+    const erpSalesTotal = groupResult?.erpSalesTotal ?? splitSalesMatch?.erpSalesTotal ?? consistentGroupErpAmount(documents);
+    const differenceAmount = groupResult?.differenceAmount ?? (settlementAmount !== null && erpSalesTotal !== null ? roundMoney(erpSalesTotal - settlementAmount) : null);
+    const autoMatched = shouldAutoMatchSplitGroup(documents, settlementAmount, erpSalesTotal, differenceAmount);
+    if (autoMatched) {
+      for (const document of documents) {
+        const salesAmount = splitSalesMatch?.documentAmounts.get(document.id);
+        if (salesAmount) {
+          document.confirmedSettlementAmount = salesAmount.amount;
+          document.confirmedSettlementLabel = salesAmount.label ?? document.confirmedSettlementLabel;
+          document.erpSalesTotal = erpSalesTotal;
+        }
+        document.status = "SUCCEEDED";
+        document.issues = [];
+        document.updatedAt = now;
+      }
+    }
     return {
       id,
       key,
@@ -490,24 +580,156 @@ export function rebuildBatchGroups(state: BatchState) {
       period,
       documentIds: documents.map((document) => document.id),
       documentCount: documents.length,
-      status,
+      status: autoMatched ? "SUCCEEDED" : status,
       taskId: documents.find((document) => document.taskId)?.taskId ?? null,
       settlementAmount,
       erpSalesTotal,
-      differenceAmount: settlementAmount !== null && erpSalesTotal !== null ? erpSalesTotal - settlementAmount : null,
+      differenceAmount,
       version,
-      issues: [...new Set(documents.flatMap((document) => document.issues))],
+      issues: autoMatched ? [] : [...new Set(documents.flatMap((document) => document.issues))],
     };
   });
 
   const statuses = state.documents.map((document) => document.status);
   state.status = statuses.includes("PROCESSING") ? "PROCESSING"
-    : statuses.every((status) => status === "CANCELLED") ? "CANCELLED"
-      : statuses.some((status) => status === "FAILED") && !statuses.some((status) => ["READY", "PROCESSING"].includes(status)) ? "FAILED"
+    : statuses.some((status) => status === "FAILED") && !statuses.some((status) => ["READY", "PROCESSING"].includes(status)) ? "FAILED"
+      : statuses.some((status) => status === "CANCELLED") && !statuses.some((status) => ["READY", "PROCESSING"].includes(status)) ? "CANCELLED"
         : statuses.some((status) => status === "READY") ? "READY"
           : statuses.some((status) => status === "NEEDS_REVIEW") ? "NEEDS_REVIEW"
             : statuses.some((status) => status === "SUCCEEDED") ? "COMPLETED"
               : "DRAFT";
+}
+
+function moneyCents(value: number) {
+  return Math.round(value * 100);
+}
+
+function roundMoney(value: number) {
+  return moneyCents(value) / 100;
+}
+
+function resolveCombinedTaskGroupResult(documents: BatchDocumentState[]) {
+  if (documents.length <= 1) return null;
+  const taskIds = [...new Set(documents.map((document) => document.taskId).filter(Boolean))];
+  if (taskIds.length !== 1) return null;
+  const settlementAmount = consistentAmount(documents.map((document) => document.groupSettlementAmount));
+  const erpSalesTotal = consistentAmount(documents.map((document) => document.groupErpSalesTotal));
+  if (settlementAmount === null || erpSalesTotal === null) return null;
+  return {
+    settlementAmount,
+    erpSalesTotal,
+    differenceAmount: roundMoney(erpSalesTotal - settlementAmount),
+  };
+}
+
+function resolveSplitSalesGroupMatch(documents: BatchDocumentState[]) {
+  if (documents.length <= 1) return null;
+  const erpSalesTotal = consistentAmount(documents.map((document) => document.erpRawSalesTotal));
+  if (erpSalesTotal === null) return null;
+  const candidates = documents.map((document) => salesSettlementCandidate(document));
+  if (!candidates.every(Boolean)) return null;
+
+  const settlementAmount = roundMoney(candidates.reduce((sum, candidate) => sum + (candidate?.amount ?? 0), 0));
+  const differenceAmount = roundMoney(erpSalesTotal - settlementAmount);
+  if (Math.abs(moneyCents(differenceAmount)) > batchAutoMatchThresholdCents) return null;
+  return {
+    settlementAmount,
+    erpSalesTotal,
+    documentAmounts: new Map(candidates.map((candidate) => [candidate!.documentId, candidate!])),
+  };
+}
+
+function salesSettlementCandidate(document: BatchDocumentState) {
+  if (Number.isFinite(document.salesSettlementAmount)) {
+    return {
+      documentId: document.id,
+      amount: roundMoney(document.salesSettlementAmount as number),
+      label: document.salesSettlementLabel ?? "本期实销金额",
+    };
+  }
+  if (preferredGroupBasisFromSettlementLabel(document.confirmedSettlementLabel ?? "") === "sales_total"
+    && Number.isFinite(document.confirmedSettlementAmount)) {
+    return {
+      documentId: document.id,
+      amount: roundMoney(document.confirmedSettlementAmount as number),
+      label: document.confirmedSettlementLabel,
+    };
+  }
+  const issueAmount = extractSalesSettlementAmount(document.issues.join(" "));
+  if (issueAmount !== null) {
+    return {
+      documentId: document.id,
+      amount: issueAmount,
+      label: "本期实销金额",
+    };
+  }
+  return null;
+}
+
+function extractSalesSettlementAmount(text: string) {
+  const normalized = text.normalize("NFKC");
+  const match = amountAfterLabel(normalized, /(本期实销金额|本期实销|实销金额)/)
+    ?? amountAfterLabel(normalized.replace(/ERP[^。；]*?(?:销售金额|销售额|销售收入|营业额)[^。；]*/g, ""), /(销售金额|销售额|销售收入|营业额)/);
+  if (!match) return null;
+  const amount = Number(match.replace(/,/g, ""));
+  return Number.isFinite(amount) ? roundMoney(amount) : null;
+}
+
+function amountAfterLabel(text: string, labelPattern: RegExp) {
+  const match = new RegExp(`${labelPattern.source}\\s*(?:为|是|:|：|人民币)?\\s*([+-]?\\d+(?:,\\d{3})*(?:\\.\\d+)?)`).exec(text);
+  return match?.[2] ?? null;
+}
+
+function consistentGroupErpAmount(documents: BatchDocumentState[]) {
+  if (documents.length > 1) {
+    const preferredBasis = consistentPreferredGroupBasis(documents);
+    if (preferredBasis) {
+      const rawAmounts = documents.map((document) => (
+        preferredBasis === "sales_total" ? document.erpRawSalesTotal : document.erpRawNetSalesTotal
+      ));
+      const rawAmount = consistentAmount(rawAmounts);
+      if (rawAmount !== null) return rawAmount;
+    }
+  }
+  const amounts = documents.map((document) => document.erpSalesTotal);
+  return consistentAmount(amounts);
+}
+
+function consistentAmount(amounts: Array<number | null | undefined>) {
+  if (!amounts.every((amount): amount is number => Number.isFinite(amount))) return null;
+  const first = moneyCents(amounts[0]);
+  return amounts.every((amount) => moneyCents(amount) === first) ? amounts[0] : null;
+}
+
+function consistentPreferredGroupBasis(documents: BatchDocumentState[]) {
+  const bases = documents.map((document) => preferredGroupBasisFromSettlementLabel(document.confirmedSettlementLabel ?? ""));
+  if (!bases.every((basis): basis is "sales_total" | "net_sales_total" => Boolean(basis))) return null;
+  const first = bases[0];
+  return bases.every((basis) => basis === first) ? first : null;
+}
+
+function preferredGroupBasisFromSettlementLabel(label: string) {
+  const normalized = label.normalize("NFKC").replace(/\s+/g, "");
+  const salesPattern = /(实销|实际销售|本期实销|销售收入|销售金额|销售额|销售总额|本月销售|门店销售|正常销售|营业额)/;
+  const netPattern = /(净营业额|扣点后|提成后|分成后|销售成本|结账金额|结帐金额|结算金额|结算净额|结算款|开票|发票|实际应付|实际付款|应付金额|付款金额|得款|供应商应得|供应商应开发票|本期应结|价税合计)/;
+  if (salesPattern.test(normalized) && !netPattern.test(normalized)) return "sales_total";
+  if (netPattern.test(normalized)) return "net_sales_total";
+  if (salesPattern.test(normalized)) return "sales_total";
+  return null;
+}
+
+function shouldAutoMatchSplitGroup(
+  documents: BatchDocumentState[],
+  settlementAmount: number | null,
+  erpSalesTotal: number | null,
+  differenceAmount: number | null,
+) {
+  return documents.length > 1
+    && documents.every((document) => document.status === "SUCCEEDED" || document.status === "NEEDS_REVIEW")
+    && settlementAmount !== null
+    && erpSalesTotal !== null
+    && differenceAmount !== null
+    && Math.abs(moneyCents(differenceAmount)) <= batchAutoMatchThresholdCents;
 }
 
 export async function persistNewBatch(state: BatchState) {
@@ -541,28 +763,44 @@ export async function persistNewBatch(state: BatchState) {
   return state;
 }
 
-export async function syncBatchState(state: BatchState, documentIds?: string[]) {
-  rebuildBatchGroups(state);
-  writeBatchState(state);
+export function mergeTargetDocumentsForSync(state: BatchState, documentIds: string[] | undefined, latest: BatchState | null) {
+  if (!documentIds?.length || !latest || latest.id !== state.id) return state;
+  const targets = new Set(documentIds);
+  const replacements = new Map(state.documents.filter((document) => targets.has(document.id)).map((document) => [document.id, document]));
+  return {
+    ...latest,
+    recordId: state.recordId ?? latest.recordId,
+    documents: latest.documents.map((document) => replacements.get(document.id) ?? document),
+  };
+}
+
+export function syncBatchState(state: BatchState, documentIds?: string[]) {
+  const next = batchSyncChain.then(() => syncBatchStateNow(state, documentIds), () => syncBatchStateNow(state, documentIds));
+  batchSyncChain = next.catch(() => undefined);
+  return next;
+}
+
+async function syncBatchStateNow(state: BatchState, documentIds?: string[]) {
+  const stateToSync = mergeTargetDocumentsForSync(state, documentIds, readBatchState(state.id));
+  rebuildBatchGroups(stateToSync);
+  writeBatchState(stateToSync);
   const tables = await ensureBatchTables();
-  state.recordId = await recordUpsert(tables.batchTableId, batchRecordValues(state), state.recordId);
-  const targets = documentIds?.length
-    ? state.documents.filter((document) => documentIds.includes(document.id))
-    : state.documents;
+  stateToSync.recordId = await recordUpsert(tables.batchTableId, batchRecordValues(stateToSync), stateToSync.recordId);
+  const targetIds = documentIds?.length ? new Set(documentIds) : null;
+  const targetGroupIds = targetIds
+    ? new Set(stateToSync.documents.filter((document) => targetIds.has(document.id) && document.groupId).map((document) => document.groupId))
+    : null;
+  const targets = targetIds
+    ? stateToSync.documents.filter((document) => targetIds.has(document.id) || Boolean(document.groupId && targetGroupIds?.has(document.groupId)))
+    : stateToSync.documents;
   for (const document of targets) {
     if (!document.recordId) continue;
     const values = documentRecordValues(document);
-    values.批处理ID = state.id;
+    values.批处理ID = stateToSync.id;
     await recordUpsert(tables.documentTableId, values, document.recordId);
   }
-  writeBatchState(state);
-}
-
-export async function queryDocumentErp(document: BatchDocumentState) {
-  if (!document.shopNo || !document.period) return;
-  const erp = await queryErpReconciliationData(document.shopNo, document.period);
-  document.erpRows = erp.rows.length;
-  document.erpSalesTotal = erp.salesTotal;
+  Object.assign(state, stateToSync);
+  writeBatchState(stateToSync);
 }
 
 export function createBatchDocument(params: {
@@ -603,8 +841,19 @@ export function createBatchDocument(params: {
     confirmedCandidateId: params.confirmedCandidateId,
     confirmedSettlementAmount: params.confirmedSettlementAmount,
     confirmedSettlementLabel: params.confirmedSettlementLabel,
+    salesSettlementAmount: preferredGroupBasisFromSettlementLabel(params.confirmedSettlementLabel ?? "") === "sales_total"
+      ? params.confirmedSettlementAmount
+      : null,
+    salesSettlementLabel: preferredGroupBasisFromSettlementLabel(params.confirmedSettlementLabel ?? "") === "sales_total"
+      ? params.confirmedSettlementLabel
+      : null,
+    groupSettlementAmount: null,
+    groupSettlementLabel: null,
+    groupErpSalesTotal: null,
     erpRows: params.erpRows,
     erpSalesTotal: params.erpSalesTotal,
+    erpRawSalesTotal: null,
+    erpRawNetSalesTotal: null,
     groupId: null,
     taskId: null,
     status: params.status,
@@ -624,7 +873,7 @@ export function toBatchApi(state: BatchState) {
     totalFiles: state.totalFiles,
     totalSize: state.totalSize,
     validFiles: counts.valid,
-    executableFiles: state.documents.filter(isExecutableDocument).length,
+    executableFiles: buildBatchExecutionGroups(state).length,
     executableGroups: counts.readyGroups,
     rejectedFiles: state.documents.filter((document) => document.status === "REJECTED").length,
     duplicateFiles: state.documents.filter((document) => document.status === "DUPLICATE").length,
@@ -651,8 +900,13 @@ export function toBatchApi(state: BatchState) {
       confirmedCandidateId: document.confirmedCandidateId,
       confirmedSettlementAmount: document.confirmedSettlementAmount,
       confirmedSettlementLabel: document.confirmedSettlementLabel,
+      groupSettlementAmount: document.groupSettlementAmount ?? null,
+      groupSettlementLabel: document.groupSettlementLabel ?? null,
+      groupErpSalesTotal: document.groupErpSalesTotal ?? null,
       erpRows: document.erpRows,
       erpSalesTotal: document.erpSalesTotal,
+      erpRawSalesTotal: document.erpRawSalesTotal ?? null,
+      erpRawNetSalesTotal: document.erpRawNetSalesTotal ?? null,
       status: document.status,
       issues: document.issues,
       taskId: document.taskId,
@@ -661,13 +915,22 @@ export function toBatchApi(state: BatchState) {
 }
 
 export function buildBatchExportCsv(state: BatchState) {
+  rebuildBatchGroups(state);
+  const groupsById = new Map(state.groups.map((group) => [group.id, group]));
   const columns = [
     "批处理ID", "组ID", "明细ID", "状态", "店铺号", "账期", "单据名称", "源文件名",
     "确认金额", "ERP销售额", "差额", "任务ID", "版本", "问题",
   ];
   const rows = state.documents.map((document) => {
-    const difference = document.confirmedSettlementAmount !== null && document.erpSalesTotal !== null
-      ? document.erpSalesTotal - document.confirmedSettlementAmount
+    const group = document.groupId ? groupsById.get(document.groupId) : null;
+    const groupErpAmount = group && group.documentCount > 1 && group.erpSalesTotal !== null
+      ? group.erpSalesTotal
+      : null;
+    const erpAmount = groupErpAmount ?? document.erpSalesTotal;
+    const difference = document.confirmedSettlementAmount !== null && erpAmount !== null
+      ? group && group.documentCount > 1 && groupErpAmount !== null
+        ? group.differenceAmount
+        : roundMoney(erpAmount - document.confirmedSettlementAmount)
       : null;
     return [
       state.id,
@@ -679,7 +942,7 @@ export function buildBatchExportCsv(state: BatchState) {
       document.fileName,
       document.sourceFileName ?? "",
       document.confirmedSettlementAmount ?? "",
-      document.erpSalesTotal ?? "",
+      erpAmount ?? "",
       difference ?? "",
       document.taskId ?? "",
       `v${document.version}`,

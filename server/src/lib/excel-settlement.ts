@@ -40,13 +40,21 @@ if ext == ".xlsx":
         add_sheet(sheet.title, sheet_rows)
 else:
     import xlrd
+    from xlrd.xldate import xldate_as_datetime
     workbook = xlrd.open_workbook(path)
     for sheet in workbook.sheets():
         sheet_rows = []
         for row_index in range(min(sheet.nrows, max_rows)):
             row = []
             for col_index in range(min(sheet.ncols, max_cols)):
-                row.append(clean(sheet.cell_value(row_index, col_index)))
+                cell = sheet.cell(row_index, col_index)
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        row.append(xldate_as_datetime(cell.value, workbook.datemode).strftime("%Y-%m-%d"))
+                    except Exception:
+                        row.append(clean(cell.value))
+                else:
+                    row.append(clean(cell.value))
             sheet_rows.append(row)
         add_sheet(sheet.name, sheet_rows)
 
@@ -151,6 +159,8 @@ export function buildExcelSettlementExtraction(
   const rawAgentPayload = {
     settlementAmount: candidate.amount,
     settlementAmountLabel: candidate.label,
+    erpBasis: "ambiguous" as const,
+    basisReason: "本地 Excel 快速抽取只确定结算金额，未经过 Agent 口径判断。",
     issues: "",
     period: draft.period,
     name: draft.name,
@@ -265,10 +275,8 @@ function normalizeCell(value: unknown) {
 }
 
 export function extractPeriodFromRows(fileName: string, rows: string[][]) {
-  const cells = rows.flat();
-  const periodTexts = cells.filter((cell) => /(结算|账期|期间|起止|月份)/.test(cell));
-  return findSeparatedPeriod(periodTexts.join(" "))
-    ?? findSeparatedPeriod(cells.join(" "))
+  const periodRows = rows.filter((row) => row.some((cell) => /(结算|账期|期间|起止|月份)/.test(cell)));
+  return findSeparatedPeriod(periodRows.map((row) => row.join(" ")).join(" "))
     ?? extractPeriodFromFileName(fileName);
 }
 
@@ -276,13 +284,19 @@ export function extractPeriodFromFileName(fileName: string) {
   const normalized = fileName.normalize("NFKC");
   const compact = normalized.match(/(^|\D)(20\d{2})(0[1-9]|1[0-2])(\D|$)/);
   if (compact) return `${compact[2]}-${compact[3]}`;
-  return findSeparatedPeriod(normalized);
+  return findSeparatedPeriod(normalized) ?? findMonthOnlyPeriod(normalized);
 }
 
 function findSeparatedPeriod(text: string) {
   const separated = text.match(/(20\d{2})\s*[年./-]\s*(0?[1-9]|1[0-2])\s*(?:月|[./-]\s*\d{1,2}|(\s|$))/);
   if (separated) return `${separated[1]}-${separated[2].padStart(2, "0")}`;
   return null;
+}
+
+function findMonthOnlyPeriod(text: string) {
+  const monthOnly = text.match(/(^|\D)(0?[1-9]|1[0-2])\s*月/);
+  if (!monthOnly) return null;
+  return `${new Date().getFullYear()}-${monthOnly[2].padStart(2, "0")}`;
 }
 
 function splitRowsIntoDocumentBlocks(rows: string[][]) {

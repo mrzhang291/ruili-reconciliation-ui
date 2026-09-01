@@ -120,7 +120,7 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(httpClient, /\/api\/batches/);
   assert.match(httpClient, /\/execute/);
   assert.doesNotMatch(httpClient, /\/api\/tasks\/batch/);
-  assert.match(createTaskSource, /formData\.append\("erpFile", input\.erpFile\)/);
+  assert.doesNotMatch(createTaskSource, /formData\.append\("erpFile"/);
   assert.match(httpClient, /\/api\/erp\/import/);
   assert.match(httpClient, /formData\.append\("erpFile", input\.file\)/);
   assert.match(httpClient, /updateReviewItem/);
@@ -182,13 +182,14 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(serverBatches, /batchesRouter\.patch\("\/documents\/:documentId\/amount"/);
   assert.match(serverBatches, /batchesRouter\.get\("\/:id\/export"/);
   assert.match(serverBatches, /readExcelSettlementDocuments/);
-  assert.match(serverBatches, /settlementFileRejectionReason/);
+  assert.match(serverBatches, /settlementFileHardRejectionReason/);
   assert.doesNotMatch(serverBatches, /describeMultiShopErpPreview/);
   assert.match(serverBatches, /sourceFileName/);
   assert.match(serverBatches, /persistNewBatch/);
   assert.match(serverBatches, /createReconciliationTask/);
   assert.match(serverBatches, /agentName 为必填字段/);
-  assert.match(serverBatches, /status = "NEEDS_REVIEW"/);
+  assert.match(serverBatches, /settlementHint/);
+  assert.match(serverBatches, /ERP_FILE_NOT_ALLOWED/);
   assert.match(serverBatches, /sha256/);
   assert.doesNotMatch(serverBatches, /非 Excel 批量单据需要人工确认金额/);
   assert.match(serverTasks, /getTaskProgress/);
@@ -201,13 +202,14 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(settlementFileRules, /多个店铺号/);
   assert.match(serverFiles, /toUpperCase\(\)/);
   assert.match(reconciliationService, /files\/SETTLEMENT/);
-  assert.match(reconciliationService, /files\.erp/);
-  assert.match(reconciliationService, /parseErpWorkbook/);
-  assert.match(reconciliationService, /resolveErpData/);
-  assert.match(reconciliationService, /readExcelSettlementDraft/);
-  assert.match(reconciliationService, /chooseExcelSettlementCandidate/);
-  assert.match(reconciliationService, /queryErpReconciliationData/);
-  assert.match(reconciliationService, /buildReconciliationResult/);
+  assert.doesNotMatch(reconciliationService, /files\.erp/);
+  assert.doesNotMatch(reconciliationService, /parseErpWorkbook/);
+  assert.doesNotMatch(reconciliationService, /resolveErpData/);
+  assert.doesNotMatch(reconciliationService, /readExcelSettlementDraft/);
+  assert.doesNotMatch(reconciliationService, /chooseExcelSettlementCandidate/);
+  assert.doesNotMatch(reconciliationService, /queryErpReconciliationData/);
+  assert.doesNotMatch(reconciliationService, /buildReconciliationResult/);
+  assert.match(reconciliationService, /本地 MCP JSON-RPC 命令/);
   assert.match(reconciliationService, /onSettled/);
   assert.doesNotMatch(reconciliationService, /createReconciliationGroupTask/);
   assert.doesNotMatch(reconciliationService, /deterministic_batch_group/);
@@ -228,12 +230,17 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(cherryStudio, /details: rawDetail\(event\.output\)/);
   assert.match(taskProgress, /findIndex\(\(item\) => item\.id === log\.id\)/);
   assert.match(taskProgress, /maxLogsPerTask = 300/);
-  assert.match(agentOutputContract, /必须且只能包含以下五个字段/);
+  assert.match(agentOutputContract, /必须且只能包含以下十二个字段/);
   assert.match(agentOutputContract, /不接受 `issues` 数组/);
+  assert.match(agentOutputContract, /erpBasis/);
+  assert.match(agentOutputContract, /salesTotal/);
+  assert.match(agentOutputContract, /matched/);
+  assert.match(agentOutputContract, /basisReason/);
   assert.match(erpBaseQuery, /"base", "\+record-list"/);
   assert.match(erpBaseQuery, /config\.lark\.erpTableId/);
-  assert.match(erpBaseQuery, /ERP销售额/);
-  assert.match(erpBaseQuery, /basis: "sales_total"/);
+  assert.match(erpBaseQuery, /calculateErpTotals/);
+  assert.doesNotMatch(erpBaseQuery, /buildReconciliationResult/);
+  assert.doesNotMatch(erpBaseQuery, /chooseErpBasis/);
   assert.match(excelSettlement, /openpyxl/);
   assert.match(excelSettlement, /xlrd/);
   assert.match(excelSettlement, /本月结算营业额小计/);
@@ -243,10 +250,34 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.doesNotMatch(reconciliationService, /prisma|pg_advisory/i);
   assert.match(promptTemplate, /飞书知识规则快照/);
   assert.match(promptTemplate, /settlementAmountLabel/);
-  assert.match(promptTemplate, /不要读取、计算、猜测或输出 ERP\/DRP 金额/);
+  assert.match(promptTemplate, /erpBasis/);
+  assert.match(promptTemplate, /本地 MCP JSON-RPC/);
+  assert.match(promptTemplate, /salesTotal/);
+  assert.match(promptTemplate, /netSalesTotal/);
+  assert.match(promptTemplate, /matched/);
+  assert.match(promptTemplate, /禁止使用 MinerU、OCR 或 Subagent/);
   assert.match(promptTemplate, /不要先调用 WindowsApps 里的 python3/);
   assert.match(promptTemplate, /格式必须为 "YYYY-MM"/);
-  assert.equal(extractPromptTemplate(reconciliationService), extractPromptTemplate(promptTemplate));
+  const serverPrompt = extractPromptTemplate(reconciliationService);
+  const uiPrompt = extractPromptTemplate(promptTemplate);
+  for (const pattern of [
+    /本地 MCP JSON-RPC/,
+    /wd3FCVOL5nMNLODNeRfOr/,
+    /summarize_store_period/,
+    /不要交给 Subagent/,
+    /salesTotal/,
+    /netSalesTotal/,
+    /matched/,
+    /格式必须为 "YYYY-MM"/,
+  ]) {
+    assert.match(serverPrompt, pattern);
+    assert.match(uiPrompt, pattern);
+  }
+  assert.match(serverPrompt, /本地服务脚本/);
+  assert.match(serverPrompt, /不要调用 CherryStudio 原生工具列表/);
+  assert.match(uiPrompt, /不要调用 CherryStudio 原生工具列表/);
+  assert.match(serverPrompt, /\$\{mcpCommand\}/);
+  assert.match(uiPrompt, /项目根目录 \.mcp\.json/);
   assert.match(larkKnowledge, /runLarkCli/);
   assert.match(larkCli, /"--profile", config\.lark\.profile/);
   assert.match(larkKnowledge, /"base", "\+record-list"/);
@@ -260,7 +291,8 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.doesNotMatch(larkStore, /prisma|postgres/i);
   assert.match(startAll, /npm-cli\.js/);
   assert.match(startAll, /"vite", "bin", "vite\.js"/);
-  assert.match(startAll, /"watch", "src\/index\.ts"/);
+  assert.match(startAll, /"dist", "index\.js"/);
+  assert.doesNotMatch(startAll, /"watch", "src\/index\.ts"/);
   assert.match(startAll, /--restart/);
   assert.match(startAll, /testLark/);
   assert.doesNotMatch(startAll, /SSH_|prisma|postgres/i);
@@ -270,13 +302,16 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(httpClient, /formData\.append\("agentName", agentName\)/);
   assert.match(startView, /Agent 名称（必填）/);
   assert.match(startView, /required/);
-  assert.match(startView, /ERP 来源/);
-  assert.match(startView, /上传 ERP/);
+  assert.match(startView, /ERP\/DRP 数据源/);
+  assert.match(startView, /MCP 查询/);
+  assert.doesNotMatch(startView, /上传 ERP/);
   assert.doesNotMatch(startView, /批量结算单文件夹/);
   assert.doesNotMatch(startView, /新增 ERP 总表/);
   assert.match(batchView, /批量结算单文件/);
   assert.match(batchView, /选择多个文件/);
   assert.doesNotMatch(batchView, /webkitdirectory/);
+  assert.match(batchView, /ERP\/DRP 数据源/);
+  assert.doesNotMatch(batchView, /上传 ERP/);
   assert.match(batchView, /startBatchReconciliation/);
   assert.match(batchView, /开始预检/);
   assert.match(batchView, /确认执行/);

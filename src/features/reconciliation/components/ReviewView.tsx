@@ -9,6 +9,17 @@ const reviewStatusLabels: Record<ReviewItemStatus, string> = {
   IGNORED: "已忽略",
 };
 
+const scopeMismatchPattern = /聚合范围与结算单范围不一致|不能将ERP店铺聚合金额直接视为普通差额|ERP全店汇总|full-shop差额.*不作为|合同\/专柜\/铺位\/活动范围键|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致|(?:预览页面|请勿用来结算)|(?:账期|期间|月份).*?(?:不一致|冲突)|(?:文件名主体|正文主体|结算主体|主体名称).*?(?:不一致|冲突)|(?:字段)?口径.*?(?:不一致|冲突)|无法唯一确定对账口径|金额接近度与字段口径存在冲突|结算单扣率.*?ERP.*?扣率|ERP.*?扣率.*?结算单扣率|ERP.*(?:聚合|汇总|店铺号|店铺|同店|同一店铺|多条|多档|不同扣率).*?(?:范围|不可比|缺口|无法确认|无法对应|不能直接|明细范围|合同|专柜|铺位|活动|特卖|本结算单|单一|部分|仅覆盖|未覆盖|口径)|(?:单一合同|单一专柜|单一结算部门|单一客户合同|仅覆盖|仅列示|仅显示).*?ERP/;
+
+function isScopeMismatchText(value: string) {
+  const text = value.normalize("NFKC").replace(/\s+/g, "");
+  return scopeMismatchPattern.test(text);
+}
+
+function reviewDifferenceText(message: string, suggestion: string | null, differenceAmount: Parameters<typeof formatMoney>[0]) {
+  return isScopeMismatchText(`${message}\n${suggestion ?? ""}`) ? "范围不可比" : formatMoney(differenceAmount);
+}
+
 export function ReviewView() {
   const {
     rows,
@@ -65,7 +76,7 @@ export function ReviewView() {
                     <td><strong>{item.fieldName}</strong><span>{task.periodLabel ?? "账期待识别"}</span></td>
                     <td className="number-cell">{formatMoney(item.settlementValue)}</td>
                     <td className="number-cell">{formatMoney(item.erpValue)}</td>
-                    <td className="number-cell number-cell--issue">{formatMoney(item.differenceAmount)}</td>
+                    <td className="number-cell number-cell--issue">{reviewDifferenceText(item.message, item.suggestion, item.differenceAmount)}</td>
                     <td className="review-message"><strong>{item.message}</strong><span>{item.suggestion ?? "请结合原始表格确认"}</span></td>
                     <td><span className={`review-pill review-pill--${status.toLowerCase()}`}>{reviewStatusLabels[status]}</span></td>
                     <td>

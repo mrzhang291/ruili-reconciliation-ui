@@ -2,7 +2,7 @@
 // 任务执行与处理日志由 ReconciliationTaskProvider 统一管理，切换页面不丢失。
 import { useState } from "react";
 import type { ChangeEvent, Dispatch, SetStateAction } from "react";
-import { validateBatchReconciliationFile, validateErpFile, validateReconciliationFile } from "../model/file-rules";
+import { validateBatchReconciliationFile, validateReconciliationFile } from "../model/file-rules";
 
 type BatchRejectedFile = { name: string; reason: string };
 type FileWithRelativePath = File & { webkitRelativePath?: string };
@@ -15,7 +15,6 @@ export function useStartReconciliation() {
   const [settlementFile, setSettlementFile] = useState<File | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchRejectedFiles, setBatchRejectedFiles] = useState<BatchRejectedFile[]>([]);
-  const [taskErpFile, setTaskErpFile] = useState<File | null>(null);
   const [agentName, setAgentName] = useState("锐力");
   const [agentWorkspace, setAgentWorkspace] = useState("");
   const [formError, setFormError] = useState("");
@@ -69,13 +68,11 @@ export function useStartReconciliation() {
     settlementFile,
     batchFiles,
     batchRejectedFiles,
-    taskErpFile,
     agentName,
     agentWorkspace,
     formError,
     setAgentName,
     setAgentWorkspace,
-    clearTaskErpFile: () => setTaskErpFile(null),
     clearBatchFiles: () => {
       setBatchFiles([]);
       setBatchRejectedFiles([]);
@@ -87,6 +84,5 @@ export function useStartReconciliation() {
       handleSettlementFileChange(event);
     },
     handleBatchFilesChange,
-    handleTaskErpFileChange: createFileChangeHandler(setTaskErpFile, "ERP 文件", validateErpFile),
   };
 }

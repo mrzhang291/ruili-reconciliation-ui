@@ -87,7 +87,7 @@ export function toViewModel(task: ReconciliationTaskSummary): ReconciliationView
     erp: task.erpFile.name,
     amount: formatMoney(task.metrics.settlementAmount, isPending ? "待计算" : "—"),
     matched: total === null || matched === null ? (isPending ? "正在解析" : "—") : `${matched.toLocaleString()} / ${total.toLocaleString()}`,
-    variance: formatMoney(task.metrics.differenceAmount),
+    variance: task.metrics.scopeMismatch ? "范围不可比" : formatMoney(task.metrics.differenceAmount),
     status: displayStatus(task.status),
     time: formatTaskTime(task.createdAt),
     owner: task.createdBy.name,

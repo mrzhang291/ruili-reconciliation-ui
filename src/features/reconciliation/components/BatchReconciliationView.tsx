@@ -6,7 +6,6 @@ import { useReconciliationTask } from "../hooks/ReconciliationTaskProvider";
 import {
   batchReconciliationMaxFiles,
   batchReconciliationMaxTotalSizeMb,
-  erpFileAccept,
   formatFileSize,
   reconciliationFileAccept,
   reconciliationFileHint,
@@ -18,7 +17,7 @@ import { ProcessLogPanel } from "./ProcessLogPanel";
 const precheckStatusLabels: Record<BatchPrecheckItemStatus, string> = {
   READY: "可执行",
   NEEDS_REVIEW: "待确认",
-  REJECTED: "已拒绝",
+  REJECTED: "已跳过",
   DUPLICATE: "已去重",
   PROCESSING: "处理中",
   SUCCEEDED: "已一致",
@@ -50,8 +49,7 @@ function moneyText(value: number | null) {
 
 function isRunnableBatchItem(item: BatchPrecheckItem) {
   return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(item.status)
-    && !item.taskId
-    && Boolean(item.shopNo);
+    && !item.taskId;
 }
 
 function documentDraft(item: BatchPrecheckItem, drafts: Record<string, ManualDraft>) {
@@ -66,16 +64,13 @@ export function BatchReconciliationView() {
   const {
     batchFiles,
     batchRejectedFiles,
-    taskErpFile,
     agentName,
     agentWorkspace,
     formError,
     setAgentName,
     setAgentWorkspace,
-    clearTaskErpFile,
     clearBatchFiles,
     handleBatchFilesChange,
-    handleTaskErpFileChange,
   } = useStartReconciliation();
   const {
     running,
@@ -96,12 +91,10 @@ export function BatchReconciliationView() {
   const [savingDocumentId, setSavingDocumentId] = useState("");
 
   const inputSignature = useMemo(() => {
-    const settlementSignature = batchFiles
+    return batchFiles
       .map((file) => `${fileDisplayName(file)}:${file.size}:${file.lastModified}`)
       .join("|");
-    const erpSignature = taskErpFile ? `${taskErpFile.name}:${taskErpFile.size}:${taskErpFile.lastModified}` : "";
-    return `${settlementSignature}::${erpSignature}`;
-  }, [batchFiles, taskErpFile]);
+  }, [batchFiles]);
   const activePrecheckResult = precheckSignature === inputSignature ? precheckResult : null;
   const activePrecheckError = precheckErrorSignature === inputSignature ? precheckError : "";
   const filesReady = batchFiles.length > 0;
@@ -134,7 +127,6 @@ export function BatchReconciliationView() {
     try {
       const result = await reconciliationApi.precheckBatch({
         settlementFiles: batchFiles,
-        erpFile: taskErpFile ?? undefined,
       });
       setPrecheckResult(result);
       setPrecheckSignature(signature);
@@ -227,7 +219,7 @@ export function BatchReconciliationView() {
       return;
     }
     if (!canExecute) {
-      setPrecheckError("没有可执行组，请先处理待确认单据");
+      setPrecheckError("没有可执行单据，请移除无效或重复文件");
       setPrecheckErrorSignature(inputSignature);
       return;
     }
@@ -319,24 +311,15 @@ export function BatchReconciliationView() {
         <div className="file-card file-card--ready" aria-label="ERP 来源">
           <div className="file-card__head">
             <span className="step-index">02</span>
-            <span className="file-state">{taskErpFile ? "本批次文件" : "总表检索"}</span>
+            <span className="file-state">MCP 查询</span>
           </div>
-          <div className="file-icon" aria-hidden="true">{taskErpFile ? "XLS" : "✓"}</div>
-          <h3>ERP 来源</h3>
-          <p>上传 ERP Excel 时只服务本批次；未上传时查询飞书 ERP 明细表。</p>
+          <div className="file-icon" aria-hidden="true">MCP</div>
+          <h3>ERP/DRP 数据源</h3>
+          <p>每份结算单执行时由 Agent 按主体和账期调用 ERP/DRP MCP。</p>
           <div className="selected-file">
             <div>
-              <strong>{taskErpFile?.name ?? "飞书 ERP 明细表"}</strong>
-              <span>{taskErpFile ? `${formatFileSize(taskErpFile.size)} · 本批次优先` : "默认数据源：飞书多维表格"}</span>
-            </div>
-            <div className="file-inline-actions">
-              <label className="text-button">
-                {taskErpFile ? "更换文件" : "上传 ERP"}
-                <input type="file" accept={erpFileAccept} onChange={handleTaskErpFileChange} />
-              </label>
-              {taskErpFile && (
-                <button type="button" className="text-button" onClick={clearTaskErpFile}>用总表</button>
-              )}
+              <strong>ERP/DRP MCP</strong>
+              <span>预检不读取 ERP 金额，执行后写入飞书结果</span>
             </div>
           </div>
           <span className="file-hint">长期维护 ERP 总表请到「新增 ERP」栏目</span>
@@ -349,7 +332,7 @@ export function BatchReconciliationView() {
             <span>BATCH</span>
             <div>
               <h2>批次工作台</h2>
-              <p>预检会写入批处理汇总表和批量结算单明细表；执行时逐份创建普通对账任务。</p>
+              <p>预检会按文件名识别同店同账期结算组；执行时按组创建对账任务。</p>
             </div>
           </div>
           <div className="batch-panel__actions">
@@ -380,10 +363,10 @@ export function BatchReconciliationView() {
           {activePrecheckResult && (
             <div className="batch-precheck">
               <div className="batch-precheck__summary">
-                <span>可执行单据 {activePrecheckResult.executableFiles}</span>
+                <span>可执行组 {activePrecheckResult.executableFiles}</span>
                 <span>对账组 {activePrecheckResult.groups.length}</span>
                 <span>待确认 {pendingPrecheckCount}</span>
-                <span>拒绝 {activePrecheckResult.rejectedFiles}</span>
+                <span>跳过 {activePrecheckResult.rejectedFiles}</span>
                 <span>去重 {activePrecheckResult.duplicateFiles}</span>
               </div>
               <div className="batch-tabs" role="tablist" aria-label="批量视图">
@@ -399,7 +382,7 @@ export function BatchReconciliationView() {
                         <th>状态</th>
                         <th>单据数</th>
                         <th>结算金额</th>
-                        <th>ERP 销售额</th>
+                        <th>ERP/DRP B</th>
                         <th>差额</th>
                         <th>任务</th>
                       </tr>
@@ -418,13 +401,13 @@ export function BatchReconciliationView() {
                           </td>
                           <td>{group.documentCount}</td>
                           <td>{moneyText(group.settlementAmount)}</td>
-                          <td>{moneyText(group.erpSalesTotal)}</td>
+                          <td>{group.erpSalesTotal === null ? "执行时查询" : moneyText(group.erpSalesTotal)}</td>
                           <td>{moneyText(group.differenceAmount)}</td>
                           <td>{group.taskId ?? "—"}</td>
                         </tr>
                       ))}
                       {!activePrecheckResult.groups.length && (
-                        <tr><td colSpan={7}>还没有可生成组的单据，请先处理单据视图里的店铺号、账期和金额。</td></tr>
+                        <tr><td colSpan={7}>未形成预检分组的单据会在执行时逐份交给 Agent 识别主体和账期。</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -438,7 +421,7 @@ export function BatchReconciliationView() {
                         <th>状态</th>
                         <th>店铺号/账期</th>
                         <th>金额</th>
-                        <th>ERP 销售额</th>
+                        <th>ERP/DRP B</th>
                         <th>说明</th>
                       </tr>
                     </thead>
@@ -481,8 +464,8 @@ export function BatchReconciliationView() {
                               </div>
                               <small>{item.confirmedSettlementAmount === null ? "—" : `${item.confirmedSettlementLabel ?? "确认金额"}：${moneyText(item.confirmedSettlementAmount)}`}</small>
                             </td>
-                            <td>{moneyText(item.erpSalesTotal)}</td>
-                            <td className="batch-precheck-issues">{item.issues.length ? item.issues.join("；") : `金额候选 ${item.amountCandidateCount} 个，ERP 明细 ${item.erpRows ?? 0} 行`}</td>
+                            <td>{item.erpSalesTotal === null ? "执行时查询" : moneyText(item.erpSalesTotal)}</td>
+                            <td className="batch-precheck-issues">{item.issues.length ? item.issues.join("；") : `金额候选 ${item.amountCandidateCount} 个`}</td>
                           </tr>
                         );
                       })}
@@ -506,8 +489,8 @@ export function BatchReconciliationView() {
             </strong>
             <small>
               {activePrecheckResult
-                ? (pendingPrecheckCount ? `${pendingPrecheckCount} 份需要补店铺号` : "执行后逐份创建对账任务")
-                : filesReady ? "预检阶段会创建批次记录，不会调用 Agent" : "ERP 金额将由后端确定性计算"}
+                ? (pendingPrecheckCount ? `${pendingPrecheckCount} 份需要人工确认` : "执行后逐份创建对账任务")
+                : filesReady ? "预检阶段会创建批次记录，不会调用 Agent" : "前端不接收 ERP 文件"}
             </small>
           </div>
         </div>

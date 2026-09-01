@@ -30,6 +30,7 @@ export type ReconciliationMetrics = {
   totalCount: number | null;
   matchedCount: number | null;
   differenceCount: number | null;
+  scopeMismatch?: boolean;
 };
 
 export type ReviewItemStatus = "PENDING" | "APPROVED" | "IGNORED";
@@ -116,7 +117,6 @@ export type ReconciliationProgressListener = (log: ReconciliationProcessLog) => 
 
 export type CreateReconciliationTaskInput = {
   settlementFile: File;
-  erpFile?: File;
   agentSelector: {
     name: string;
     workspace?: string;
@@ -135,7 +135,6 @@ export type CreateBatchReconciliationTasksInput = {
 
 export type PrecheckBatchInput = {
   settlementFiles: File[];
-  erpFile?: File;
 };
 
 export type BatchPrecheckItemStatus = "READY" | "NEEDS_REVIEW" | "REJECTED" | "DUPLICATE" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
@@ -210,7 +209,7 @@ export type BatchPrecheckResult = {
 
 export type BatchReconciliationTaskCreateItem = {
   fileName: string;
-  groupId?: string;
+  groupId?: string | null;
   taskId: string | null;
   status: "PROCESSING" | "REJECTED" | "FAILED";
   error: { code: string; message: string } | null;

@@ -75,7 +75,7 @@ export function buildKnowledgeInstructions(rules: KnowledgeRule[], shopNo?: stri
     return `${index + 1}. [${rule.id || "无ID"}/${rule.version || "无版本"}] ${rule.title || rule.category || "未命名规则"}（优先级 ${rule.priority}，${scope}）\n${rule.content}`;
   });
 
-  return `你是锐力对账 Agent。以下内容是本次任务从飞书“知识规则表”读取的规则快照，已按优先级排序。只应用适用于当前店铺号的规则；冲突时前面的高优先级规则覆盖后面的规则。\n\n${lines.join("\n\n")}\n\n最终结果的字段、格式和输出方式严格遵守用户消息中的要求。`;
+  return `你是锐力对账 Agent。以下内容是本次任务从飞书“知识规则表”读取的规则快照，已按优先级排序。只应用适用于当前店铺号的规则；业务口径冲突时前面的高优先级规则覆盖后面的规则。知识规则只约束字段识别、金额口径、异常和审核判断，不得覆盖后端和用户消息给出的最终 JSON 字段契约。\n\n${lines.join("\n\n")}\n\n最终结果的字段、格式和输出方式严格遵守用户消息中的要求；如知识规则与用户消息的输出字段数量或字段名冲突，以用户消息为准。`;
 }
 
 export async function loadKnowledgeRules(now = new Date()) {

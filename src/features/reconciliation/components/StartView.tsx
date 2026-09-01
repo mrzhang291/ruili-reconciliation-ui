@@ -3,8 +3,6 @@
 import { useStartReconciliation } from "../hooks/use-start-reconciliation";
 import { useReconciliationTask } from "../hooks/ReconciliationTaskProvider";
 import {
-  erpFileAccept,
-  formatFileSize,
   reconciliationFileAccept,
   reconciliationFileHint,
 } from "../model/file-rules";
@@ -14,15 +12,12 @@ import { ProcessLogPanel } from "./ProcessLogPanel";
 export function StartView() {
   const {
     settlementFile,
-    taskErpFile,
     agentName,
     agentWorkspace,
     formError,
     setAgentName,
     setAgentWorkspace,
-    clearTaskErpFile,
     handleSettlementFileChange,
-    handleTaskErpFileChange,
   } = useStartReconciliation();
   const {
     running,
@@ -41,7 +36,7 @@ export function StartView() {
   const handleSubmit = () => {
     if (!hasAgentName) return;
     if (!settlementFile) return;
-    void startReconciliation({ settlementFile, erpFile: taskErpFile, agentName, agentWorkspace });
+    void startReconciliation({ settlementFile, agentName, agentWorkspace });
   };
 
   return (
@@ -50,7 +45,7 @@ export function StartView() {
         <div>
           <span className="eyebrow">NEW RECONCILIATION</span>
           <h1>发起一笔新对账</h1>
-          <p>导入渠道结算资料；ERP 可用本次上传文件，未上传时由后端查询飞书明细表计算。</p>
+          <p>导入渠道结算资料；Agent 会读取结算单并通过 ERP/DRP MCP 查询业务金额。</p>
         </div>
         <div className="security-note">
           <span aria-hidden="true">↗</span>
@@ -64,7 +59,7 @@ export function StartView() {
       <div className="flow-strip" aria-label="对账步骤">
         <div className="flow-item flow-item--active"><b>01</b><span>导入结算资料</span></div>
         <i />
-        <div className={filesReady ? "flow-item flow-item--active" : "flow-item"}><b>02</b><span>确定 ERP 来源</span></div>
+        <div className={filesReady ? "flow-item flow-item--active" : "flow-item"}><b>02</b><span>Agent 查询 ERP/DRP</span></div>
         <i />
         <div className={canStart ? "flow-item flow-item--active" : "flow-item"}><b>03</b><span>提交后端任务</span></div>
       </div>
@@ -115,27 +110,18 @@ export function StartView() {
         <div className="file-card file-card--ready" aria-label="ERP 来源">
           <div className="file-card__head">
             <span className="step-index">02</span>
-            <span className="file-state">{taskErpFile ? "已上传" : "总表检索"}</span>
+            <span className="file-state">MCP 查询</span>
           </div>
-          <div className="file-icon" aria-hidden="true">{taskErpFile ? "XLS" : "✓"}</div>
-          <h3>ERP 来源</h3>
-          <p>上传本次 ERP Excel 时优先使用该文件；未上传时查询飞书 ERP 明细表。</p>
+          <div className="file-icon" aria-hidden="true">MCP</div>
+          <h3>ERP/DRP 数据源</h3>
+          <p>Agent 按结算主体和账期调用 ERP/DRP MCP，返回销售额、扣点后金额和差额。</p>
           <div className="selected-file">
             <div>
-              <strong>{taskErpFile?.name ?? "飞书 ERP 明细表"}</strong>
-              <span>{taskErpFile ? `${formatFileSize(taskErpFile.size)} · 本次任务文件` : "默认数据源：飞书多维表格"}</span>
-            </div>
-            <div className="file-inline-actions">
-              <label className="text-button">
-                {taskErpFile ? "更换文件" : "上传 ERP"}
-                <input type="file" accept={erpFileAccept} onChange={handleTaskErpFileChange} />
-              </label>
-              {taskErpFile && (
-                <button type="button" className="text-button" onClick={clearTaskErpFile}>用总表</button>
-              )}
+              <strong>ERP/DRP MCP</strong>
+              <span>后端只校验 Agent JSON 并写入飞书 Base</span>
             </div>
           </div>
-          <span className="file-hint">本次 ERP 文件只参与当前任务，不写入总表</span>
+          <span className="file-hint">基础 ERP 明细维护请到「新增 ERP」栏目</span>
         </div>
       </div>
 
@@ -144,7 +130,7 @@ export function StartView() {
           <span className={`readiness-dot ${canStart ? "ready" : ""}`} />
           <div>
             <strong>{canStart ? "提交信息已准备完成" : filesReady ? "请填写 Agent 名称" : "请先导入结算资料"}</strong>
-            <small>{canStart ? (taskErpFile ? "将优先使用本次 ERP 文件计算金额" : "未上传 ERP 时将查询飞书总表") : filesReady ? "Agent 名称是创建对账任务的必填参数" : "ERP 金额将由后端确定性计算"}</small>
+            <small>{canStart ? "Agent 会完成 A+B 对账并返回严格 JSON" : filesReady ? "Agent 名称是创建对账任务的必填参数" : "前端不接收 ERP 文件"}</small>
           </div>
         </div>
         {running ? (

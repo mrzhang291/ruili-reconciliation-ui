@@ -23,22 +23,41 @@ export type CherryIssue = {
   status?: "PENDING" | "APPROVED" | "IGNORED";
 };
 
+export type AgentErpBasis = "sales_total" | "net_sales_total" | "ambiguous";
+
 export type SettlementExtractionResult = {
   name: string;
   settlementAmount: number;
   settlementAmountLabel: string;
+  erpBasis: AgentErpBasis;
+  basisReason: string;
   issues: CherryIssue[];
   period: string;
   rawAgentPayload: {
     settlementAmount: number;
     settlementAmountLabel: string;
+    erpBasis: AgentErpBasis;
+    basisReason: string;
     issues: string;
     period: string;
     name: string;
   };
 };
 
-export type CherryParseResult = SettlementExtractionResult;
+export type AgentReconciliationPayload = {
+  settlementAmount: number;
+  settlementAmountLabel: string;
+  salesTotal: number;
+  netSalesTotal: number;
+  erpBasis: AgentErpBasis;
+  erpAmount: number;
+  difference: number;
+  matched: boolean;
+  basisReason: string;
+  issues: string;
+  period: string;
+  name: string;
+};
 
 export type ReconciliationResult = {
   name: string;
@@ -48,8 +67,15 @@ export type ReconciliationResult = {
   difference: number;
   issues: CherryIssue[];
   period: string;
-  rawAgentPayload: Record<string, unknown>;
+  settlementAmountLabel: string;
+  erpBasis: AgentErpBasis;
+  basisReason: string;
+  salesTotal: number;
+  netSalesTotal: number;
+  rawAgentPayload: AgentReconciliationPayload & Record<string, unknown>;
 };
+
+export type CherryParseResult = ReconciliationResult;
 
 export type CherryAgentSession = {
   agentId: string;
@@ -306,7 +332,7 @@ export async function sendReconciliationPrompt(
     const parsed = parseAgentResponse(finalText);
     if (!parsed) {
       throw new CherryStudioError(
-        "Agent 返回格式不符合 { settlementAmount, settlementAmountLabel, issues, period, name } 契约",
+        invalidAgentResponseMessage(finalText),
         "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
       );
     }
@@ -322,7 +348,7 @@ export async function sendReconciliationPrompt(
   const parsed = parseAgentResponse(text);
   if (!parsed) {
     throw new CherryStudioError(
-      "Agent 返回格式不符合 { settlementAmount, settlementAmountLabel, issues, period, name } 契约",
+      invalidAgentResponseMessage(text),
       "CHERRYSTUDIO_AGENT_INVALID_RESPONSE",
     );
   }
@@ -549,7 +575,7 @@ export async function readSseFinalText(
 
 /**
  * 解析 agent 返回的文本（JSON 或 SSE 流中的 JSON）。
- * 从各种嵌套结构里提取结算单事实。
+ * 从各种嵌套结构里提取 Agent 完成 A+B 对账后的业务 JSON。
  */
 export function parseAgentResponse(text: string): CherryParseResult | null {
   // 尝试从整段文本解析
@@ -576,16 +602,46 @@ export function parseAgentResponse(text: string): CherryParseResult | null {
     if (joined) return joined;
   }
 
-  // 兜底：找文本里第一个 { ... }
-  const startIndex = text.indexOf("{");
-  const endIndex = text.lastIndexOf("}");
-  if (startIndex >= 0 && endIndex > startIndex) {
-    const candidate = text.slice(startIndex, endIndex + 1);
+  // 兜底：从后往前找可独立解析的 JSON 对象，避免前面混入 MCP stdout。
+  for (const candidate of jsonObjectCandidates(text).reverse()) {
     const extracted = tryParseObject(candidate);
     if (extracted) return extracted;
   }
 
   return null;
+}
+
+function jsonObjectCandidates(text: string) {
+  const candidates: string[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = inString;
+        continue;
+      }
+      if (char === "\"") {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === "{") depth += 1;
+      if (char === "}") depth -= 1;
+      if (depth === 0) {
+        candidates.push(text.slice(start, index + 1));
+        break;
+      }
+    }
+  }
+  return candidates;
 }
 
 function tryParseObject(text: string): CherryParseResult | null {
@@ -601,6 +657,35 @@ function tryParseObject(text: string): CherryParseResult | null {
   return extractResult(parsed);
 }
 
+function invalidAgentResponseMessage(text: string) {
+  const raw = extractRawContractObject(text);
+  if (raw && mentionsMissingErp(raw)) {
+    const name = typeof raw.name === "string" && raw.name.trim() ? `「${raw.name.trim()}」` : "该店铺";
+    const period = typeof raw.period === "string" && raw.period.trim() ? `在 ${raw.period.trim()} ` : "";
+    return `ERP/DRP 明细缺失：Agent 已抽取结算单，但未找到店铺号${name}${period}的 ERP/DRP 记录，不能编造 salesTotal/netSalesTotal。请补 ERP 明细或检查店铺号映射。原始输出：${singleLine(text, 500)}`;
+  }
+  return `Agent 返回格式不符合 { settlementAmount, settlementAmountLabel, salesTotal, netSalesTotal, erpBasis, erpAmount, difference, matched, basisReason, issues, period, name } 契约。原始输出：${singleLine(text, 500)}`;
+}
+
+function extractRawContractObject(text: string) {
+  for (const candidate of [text, ...jsonObjectCandidates(text).reverse()]) {
+    try {
+      const parsed = JSON.parse(candidate.trim()) as unknown;
+      if (isRecord(parsed) && "settlementAmount" in parsed) return parsed;
+    } catch {
+      // Keep scanning; Agent output often contains earlier tool JSON before the final object.
+    }
+  }
+  return null;
+}
+
+function mentionsMissingErp(payload: Record<string, unknown>) {
+  const combined = [payload.issues, payload.basisReason]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  return /ERP|DRP/i.test(combined) && /未找到|缺失|无匹配|没有匹配|not\s*found/i.test(combined);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -608,11 +693,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function extractResult(input: unknown): CherryParseResult | null {
   if (!isRecord(input)) return null;
 
-  // 顶层必须符合结算单五字段抽取契约。
+  // 顶层必须符合飞书文档目标流程的 A+B 对账契约。
   if ("settlementAmount" in input) {
     const expectedKeys = [
       "settlementAmount",
       "settlementAmountLabel",
+      "salesTotal",
+      "netSalesTotal",
+      "erpBasis",
+      "erpAmount",
+      "difference",
+      "matched",
+      "basisReason",
       "issues",
       "period",
       "name",
@@ -622,42 +714,102 @@ function extractResult(input: unknown): CherryParseResult | null {
       return null;
     }
 
-    const settlementAmount = typeof input.settlementAmount === "number" && Number.isFinite(input.settlementAmount)
-      ? input.settlementAmount
-      : null;
+    const settlementAmount = finiteNumber(input.settlementAmount);
+    const salesTotal = finiteNumber(input.salesTotal);
+    const netSalesTotal = finiteNumber(input.netSalesTotal);
     const settlementAmountLabel = extractTaskName(input.settlementAmountLabel);
+    const erpBasis = extractErpBasis(input.erpBasis);
+    const erpAmount = finiteNumber(input.erpAmount);
+    const difference = finiteNumber(input.difference);
+    const basisReason = extractReason(input.basisReason);
     const name = extractTaskName(input.name);
     const period = extractPeriod(input);
     if (
       settlementAmount === null
+      || salesTotal === null
+      || netSalesTotal === null
       || !settlementAmountLabel
+      || !erpBasis
+      || erpAmount === null
+      || difference === null
+      || typeof input.matched !== "boolean"
+      || !basisReason
       || !name
       || !period
       || typeof input.issues !== "string"
     ) return null;
 
+    const checked = validateAgentArithmetic({
+      settlementAmount,
+      settlementAmountLabel,
+      salesTotal,
+      netSalesTotal,
+      erpBasis,
+      erpAmount,
+      difference,
+      matched: input.matched,
+      basisReason,
+      issues: input.issues,
+      period,
+      name,
+    });
+    if (!checked) return null;
+
     const issueSummary = input.issues.trim();
     const rawAgentPayload = {
       settlementAmount,
       settlementAmountLabel,
+      salesTotal,
+      netSalesTotal,
+      erpBasis,
+      erpAmount,
+      difference,
+      matched: input.matched,
+      basisReason,
       issues: input.issues,
       period,
       name,
+      closestErpBasis: checked.closestBasis,
+      declaredErpBasis: checked.declaredBasis,
+      appliedErpBasis: checked.basis,
+      appliedErpAmount: checked.erpAmount,
+      appliedDifference: checked.difference,
+      basisCorrectionReason: checked.basisCorrectionReason,
+      salesDifference: checked.salesDifference,
+      netSalesDifference: checked.netSalesDifference,
+      scopedErpMismatch: checked.scopedErpMismatch,
+      reviewThresholdAmount: reconciliationReviewThresholdAmount,
     };
+    const issues: CherryIssue[] = [];
+    if (issueSummary || checked.reviewMessages.length) {
+      const backendMessage = checked.reviewMessages.length
+        ? formatBackendReviewMessage(checked, basisReason)
+        : "";
+      issues.push({
+        rowLabel: checked.reviewMessages.length ? "总差额" : "Agent 对账提示",
+        fieldName: checked.reviewMessages.length ? checked.label : settlementAmountLabel,
+        settlementAmount,
+        erpAmount: checked.erpAmount,
+        differenceAmount: checked.scopedErpMismatch ? null : checked.difference,
+        message: [issueSummary, backendMessage].filter(Boolean).join(" "),
+        suggestion: checked.scopedErpMismatch
+          ? "补充 ERP 的合同、专柜、铺位或活动范围键，或把同范围结算单合并后再复核。"
+          : checked.reviewMessages.length ? "复核结算单金额口径，必要时检查 ERP/DRP MCP 查询结果与结算单字段。" : null,
+      });
+    }
 
     return {
       name,
+      matched: checked.matched,
+      erpAmount: checked.erpAmount,
       settlementAmount,
+      difference: checked.difference,
       settlementAmountLabel,
-      issues: issueSummary
-        ? [{
-            rowLabel: "结算单抽取提示",
-            fieldName: settlementAmountLabel,
-            settlementAmount,
-            message: issueSummary,
-            suggestion: null,
-          }]
-        : [],
+      erpBasis: checked.basis,
+      basisReason,
+      salesTotal,
+      netSalesTotal,
+      issues,
       period,
       rawAgentPayload,
     };
@@ -694,6 +846,154 @@ function extractTaskName(value: unknown) {
     return code <= 31 || code === 127;
   });
   if (!normalized || normalized.length > 120 || hasControlCharacter) return null;
+  return normalized;
+}
+
+function extractErpBasis(value: unknown): AgentErpBasis | null {
+  return value === "sales_total" || value === "net_sales_total" || value === "ambiguous" ? value : null;
+}
+
+const reconciliationReviewThresholdAmount = 200;
+const basisLabels: Record<Exclude<AgentErpBasis, "ambiguous">, string> = {
+  sales_total: "ERP销售额",
+  net_sales_total: "ERP扣点后金额",
+};
+
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function toCents(value: number) {
+  return Math.round(value * 100);
+}
+
+function roundMoney(cents: number) {
+  return cents / 100;
+}
+
+function validateAgentArithmetic(payload: AgentReconciliationPayload) {
+  const settlementCents = toCents(payload.settlementAmount);
+  const salesCents = toCents(payload.salesTotal);
+  const netSalesCents = toCents(payload.netSalesTotal);
+  const options = [
+    {
+      basis: "sales_total" as const,
+      label: basisLabels.sales_total,
+      erpAmount: roundMoney(salesCents),
+      difference: roundMoney(salesCents - settlementCents),
+      differenceCents: salesCents - settlementCents,
+    },
+    {
+      basis: "net_sales_total" as const,
+      label: basisLabels.net_sales_total,
+      erpAmount: roundMoney(netSalesCents),
+      difference: roundMoney(netSalesCents - settlementCents),
+      differenceCents: netSalesCents - settlementCents,
+    },
+  ];
+  const closest = Math.abs(options[1].differenceCents) < Math.abs(options[0].differenceCents) ? options[1] : options[0];
+  const declared = payload.erpBasis === "ambiguous"
+    ? closest
+    : options.find((option) => option.basis === payload.erpBasis) ?? closest;
+  if (toCents(payload.erpAmount) !== toCents(declared.erpAmount)) return null;
+  if (toCents(payload.difference) !== toCents(declared.difference)) return null;
+
+  const preferredBasis = preferredBasisFromSettlementLabel(payload);
+  const preferred = preferredBasis ? options.find((option) => option.basis === preferredBasis) : undefined;
+  const basisCorrection = preferred && preferred.basis !== declared.basis && !isZeroSalesFeeStatement(payload, preferred.basis)
+    ? preferred
+    : null;
+  const selected = basisCorrection ?? declared;
+
+  const thresholdCents = toCents(reconciliationReviewThresholdAmount);
+  const reviewMessages: string[] = [];
+  const scopedErpMismatch = indicatesScopedErpMismatch(payload.issues);
+  if (basisCorrection) {
+    const preferredDescription = basisCorrection.basis === "sales_total" ? "扣点前销售口径" : "扣点后金额口径";
+    reviewMessages.push(`结算单字段「${payload.settlementAmountLabel}」更像${preferredDescription}，后端改按「${basisCorrection.label}」记录。`);
+  }
+  if (payload.erpBasis === "ambiguous") {
+    reviewMessages.push(`Agent 未能判断 ERP 对账口径，后端暂按差额更小的「${selected.label}」记录。`);
+  }
+  if (!scopedErpMismatch && selected.basis !== closest.basis && Math.abs(selected.differenceCents) - Math.abs(closest.differenceCents) > thresholdCents) {
+    reviewMessages.push(`Agent 选择「${selected.label}」，但「${closest.label}」与结算单金额明显更接近。`);
+  }
+  if (Math.abs(selected.differenceCents) > thresholdCents) {
+    reviewMessages.push(scopedErpMismatch
+      ? `ERP/结算单当前口径或范围不可比，直接相减为 ${selected.difference.toFixed(2)} 元；该数仅用于定位问题，不作为可结算差额。`
+      : `所选口径差额 ${selected.difference.toFixed(2)} 元，超过 ${reconciliationReviewThresholdAmount.toFixed(2)} 元阈值。`);
+  }
+  if (!payload.matched && !reviewMessages.length) {
+    reviewMessages.push("Agent 标记本次对账未一致。");
+  }
+
+  return {
+    ...selected,
+    matched: payload.matched && reviewMessages.length === 0 && Math.abs(selected.differenceCents) <= thresholdCents,
+    closestBasis: closest.basis,
+    salesDifference: options[0].difference,
+    netSalesDifference: options[1].difference,
+    reviewMessages,
+    scopedErpMismatch,
+    declaredBasis: declared.basis,
+    basisCorrectionReason: basisCorrection ? reviewMessages[0] : null,
+  };
+}
+
+function indicatesScopedErpMismatch(value: string) {
+  const text = value.normalize("NFKC").replace(/\s+/g, "");
+  return /聚合范围与结算单范围不一致|不能将ERP店铺聚合金额直接视为普通差额|ERP全店汇总|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致|(?:预览页面|请勿用来结算)|(?:账期|期间|月份).*?(?:不一致|冲突)|(?:文件名主体|正文主体|结算主体|主体名称).*?(?:不一致|冲突)|(?:字段)?口径.*?(?:不一致|冲突)|无法唯一确定对账口径|金额接近度与字段口径存在冲突|结算单扣率.*?ERP.*?扣率|ERP.*?扣率.*?结算单扣率|ERP.*(?:聚合|汇总|店铺号|店铺|同店|同一店铺|多条|多档|不同扣率).*?(?:范围|不可比|无法确认|无法对应|不能直接|明细范围|合同|专柜|铺位|活动|特卖|本结算单|单一|部分|仅覆盖|未覆盖|口径)|(?:单一合同|单一专柜|单一结算部门|单一客户合同|仅覆盖|仅列示|仅显示).*?ERP/.test(text);
+}
+
+function preferredBasisFromSettlementLabel(payload: Pick<AgentReconciliationPayload, "settlementAmount" | "settlementAmountLabel" | "salesTotal" | "basisReason" | "issues">): Exclude<AgentErpBasis, "ambiguous"> | null {
+  const label = payload.settlementAmountLabel;
+  const normalized = label.normalize("NFKC").replace(/\s+/g, "");
+  const evidence = `${label} ${payload.basisReason} ${payload.issues}`.normalize("NFKC").replace(/\s+/g, "");
+  if (/付款金额/.test(normalized)
+    && toCents(payload.settlementAmount) === toCents(payload.salesTotal)
+    && /(?:顶部|汇总区|汇总).*?(?:付款金额|销售金额|销售额).*?(?:营业额提成|销售提成|固定扣款).*?(?:应开票|本期应付)/.test(evidence)) {
+    return "sales_total";
+  }
+  const salesPattern = /(实销|实际销售|本期实销|销售收入|销售金额|销售额|销售总额|本月销售|门店销售|正常销售|营业额)/;
+  const netPattern = /(净营业额|扣点后|提成后|分成后|销售成本|结账金额|结帐金额|结算金额|结算净额|结算款|开票|发票|实际应付|实际付款|应付金额|付款金额|得款|供应商应得|供应商应开发票|本期应结|价税合计)/;
+  if (salesPattern.test(normalized) && !netPattern.test(normalized)) {
+    return "sales_total";
+  }
+  if (netPattern.test(normalized)) {
+    return "net_sales_total";
+  }
+  if (salesPattern.test(normalized)) {
+    return "sales_total";
+  }
+  return null;
+}
+
+function isZeroSalesFeeStatement(payload: AgentReconciliationPayload, preferredBasis: Exclude<AgentErpBasis, "ambiguous">) {
+  if (preferredBasis !== "sales_total" || toCents(payload.settlementAmount) !== 0) return false;
+  const evidence = `${payload.settlementAmountLabel} ${payload.basisReason} ${payload.issues}`.normalize("NFKC");
+  return /(?:销售(?:金额|额|数量)?(?:为|是)?0|0(?:元)?销售|零销售|无销售)/.test(evidence)
+    && /(?:费用|扣款|扣减|佣金|开票|发票|应付小写|补扣|调整)/.test(evidence);
+}
+
+function formatBackendReviewMessage(
+  checked: ReturnType<typeof validateAgentArithmetic> & NonNullable<ReturnType<typeof validateAgentArithmetic>>,
+  basisReason: string,
+) {
+  const agentReason = `Agent 理由：${basisReason}`;
+  if (checked.scopedErpMismatch) {
+    return `${checked.reviewMessages.join(" ")} ${agentReason}`;
+  }
+  return `${checked.reviewMessages.join(" ")} 扣点前差额 ${checked.salesDifference.toFixed(2)} 元，扣点后差额 ${checked.netSalesDifference.toFixed(2)} 元。${agentReason}`;
+}
+
+function extractReason(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  const hasControlCharacter = Array.from(normalized).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+  if (!normalized || normalized.length > 1000 || hasControlCharacter) return null;
   return normalized;
 }
 

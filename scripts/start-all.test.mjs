@@ -55,6 +55,7 @@ test("launcher rejects shared node_modules and has no database startup path", as
     const launcher = await readFile(new URL("./start-all.mjs", import.meta.url), "utf8");
     const serverPackage = JSON.parse(await readFile(new URL("../server/package.json", import.meta.url), "utf8"));
     assert.doesNotMatch(launcher, /ssh|prisma|postgres|database_url/i);
+    assert.doesNotMatch(launcher, /tsx",\s*"watch"|tsx',\s*'watch'/);
     assert.equal(serverPackage.dependencies?.["@prisma/client"], undefined);
     assert.equal(serverPackage.devDependencies?.prisma, undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }

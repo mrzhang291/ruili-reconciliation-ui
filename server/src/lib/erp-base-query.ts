@@ -2,7 +2,6 @@ import { config } from "./config.js";
 import { LarkCliError, runLarkCli } from "./lark-cli.js";
 import { cacheKey, readThroughCache } from "./read-cache.js";
 import { rowsFromPage } from "./lark-store.js";
-import type { ReconciliationResult, SettlementExtractionResult } from "./cherrystudio.js";
 
 const fields = ["店铺号", "扣点", "销售额", "月份"] as const;
 const erpQueryCacheTtlMs = 60_000;
@@ -35,8 +34,6 @@ export type ErpReconciliationData = {
   netSalesTotal: number;
 };
 
-export type ErpBasis = "sales_total" | "net_sales_total";
-
 export class ErpBaseQueryError extends Error {
   constructor(message: string, readonly code = "ERP_BASE_QUERY_ERROR") {
     super(message);
@@ -46,7 +43,6 @@ export class ErpBaseQueryError extends Error {
 
 const roundMoney = (cents: number) => cents / 100;
 const toCents = (value: number) => Math.round(value * 100);
-
 export function normalizeShopNo(value: string) {
   return value.normalize("NFKC").trim().toUpperCase();
 }
@@ -135,70 +131,6 @@ export function calculateErpTotals(rows: Array<Pick<ErpBaseRow, "salesAmount" | 
   return {
     salesTotal: roundMoney(salesCents),
     netSalesTotal: roundMoney(netSalesCents),
-  };
-}
-
-export function chooseErpBasis(settlementAmount: number, erp: Pick<ErpReconciliationData, "salesTotal" | "netSalesTotal">) {
-  const settlementCents = toCents(settlementAmount);
-  const erpCents = toCents(erp.salesTotal);
-  const diffCents = erpCents - settlementCents;
-  return {
-    basis: "sales_total" as const,
-    label: "ERP销售额",
-    erpAmount: roundMoney(erpCents),
-    difference: roundMoney(diffCents),
-    matched: diffCents === 0,
-  };
-}
-
-export function buildReconciliationResult(extraction: SettlementExtractionResult, erp: ErpReconciliationData): ReconciliationResult {
-  const selected = chooseErpBasis(extraction.settlementAmount, erp);
-  const issues = extraction.issues.map((issue) => ({
-    ...issue,
-    differenceAmount: issue.differenceAmount ?? selected.difference,
-  }));
-  if (Math.abs(selected.difference) > 0.005 && issues.length === 0) {
-    issues.push({
-      rowLabel: "总差额",
-      fieldName: selected.label,
-      settlementAmount: extraction.settlementAmount,
-      erpAmount: selected.erpAmount,
-      differenceAmount: selected.difference,
-      message: `后端按${selected.label}口径计算 ERP 金额 ${selected.erpAmount.toFixed(2)} 元，结算单金额 ${extraction.settlementAmount.toFixed(2)} 元，差额 ${selected.difference.toFixed(2)} 元。`,
-      suggestion: "复核结算单金额口径，必要时检查飞书 ERP 明细表的店铺号、月份、扣点和销售额。",
-    });
-  }
-
-  return {
-    name: extraction.name,
-    period: extraction.period,
-    matched: selected.matched,
-    erpAmount: selected.erpAmount,
-    settlementAmount: extraction.settlementAmount,
-    difference: selected.difference,
-    issues,
-    rawAgentPayload: {
-      agentExtraction: extraction.rawAgentPayload,
-      matched: selected.matched,
-      erpAmount: selected.erpAmount,
-      settlementAmount: extraction.settlementAmount,
-      difference: selected.difference,
-      recalculatedDifference: selected.difference,
-      issues: issues.map((issue) => issue.message).filter(Boolean).join("\n"),
-      period: extraction.period,
-      name: extraction.name,
-      erpBasis: selected.basis,
-      erpBasisLabel: selected.label,
-      erpQuery: {
-        tableId: config.lark.erpTableId,
-        lookupKey: erp.lookupKey,
-        period: extraction.period,
-        month: erp.month,
-      },
-      erpRows: erp.rows.length,
-      salesTotal: erp.salesTotal,
-      netSalesTotal: erp.netSalesTotal,
-    },
   };
 }
 

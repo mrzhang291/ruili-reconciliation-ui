@@ -316,7 +316,6 @@ export class HttpReconciliationApi implements ReconciliationApi {
 
     const formData = new FormData();
     formData.append("settlementFile", input.settlementFile);
-    if (input.erpFile) formData.append("erpFile", input.erpFile);
     formData.append("agentName", agentName);
     if (input.agentSelector.workspace) formData.append("agentWorkspace", input.agentSelector.workspace);
 
@@ -402,10 +401,10 @@ export class HttpReconciliationApi implements ReconciliationApi {
         uploadedAt: new Date().toISOString(),
       },
       erpFile: {
-        id: input.erpFile ? "pending" : "feishu-erp-base",
-        name: input.erpFile?.name ?? "飞书ERP明细表",
-        size: input.erpFile?.size ?? 0,
-        type: input.erpFile?.type ?? "",
+        id: "erp-drp-mcp",
+        name: "ERP/DRP MCP",
+        size: 0,
+        type: "",
         extension: null,
         uploadedAt: new Date().toISOString(),
       },
@@ -434,7 +433,6 @@ export class HttpReconciliationApi implements ReconciliationApi {
     for (const file of input.settlementFiles) {
       formData.append("settlementFiles", file, (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name);
     }
-    if (input.erpFile) formData.append("erpFile", input.erpFile);
 
     let response: Response;
     try {
@@ -488,7 +486,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
       id: `local:${crypto.randomUUID()}`,
       timestamp: new Date().toISOString(),
       level: "info",
-      message: `正在执行批处理 ${input.batchId} 的可执行单据…`,
+      message: `正在执行批处理 ${input.batchId} 的可执行组…`,
     });
 
     let response: Response;

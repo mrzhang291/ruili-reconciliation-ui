@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "wd3FCVOL5nMNLODNeRfOr": {
+      "name": "ruili-feishu-base-erp",
+      "description": "ERP/DRP reconciliation data from the project backend and Feishu Base.",
+      "command": "node",
+      "args": ["scripts/erp-base-mcp.mjs"],
+      "env": {
+        "RUILI_RECONCILIATION_API": "http://127.0.0.1:3001"
+      },
+      "isActive": true
+    }
+  }
+}

@@ -47,6 +47,9 @@ export const config = {
     lookupTimeoutMs: intFromEnv("CHERRYSTUDIO_LOOKUP_TIMEOUT_MS", 15_000),
     requestTimeoutMs: intFromEnv("CHERRYSTUDIO_REQUEST_TIMEOUT_MS", 20 * 60 * 1000),
   },
+  reconciliation: {
+    maxConcurrentTasks: Math.max(1, intFromEnv("RECONCILIATION_MAX_CONCURRENT_TASKS", 1)),
+  },
   lark: {
     profile: "aad27213",
     baseToken: process.env.LARK_BASE_TOKEN || "PgrCbbHxyaHtQLsNa8ac1gnLn2f",

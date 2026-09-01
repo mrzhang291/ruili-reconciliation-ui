@@ -23,6 +23,7 @@ const baseToApiStatus: Record<string, string> = {
   已审核: "REVIEWED",
   失败: "FAILED",
   已取消: "CANCELLED",
+  已作废: "OBSOLETE",
 };
 const apiToBaseStatus = Object.fromEntries(Object.entries(baseToApiStatus).map(([base, api]) => [api, base]));
 const baseToReviewStatus: Record<string, string> = { 待处理: "PENDING", 已通过: "APPROVED", 已忽略: "IGNORED" };
@@ -30,6 +31,7 @@ const apiToReviewStatus = Object.fromEntries(Object.entries(baseToReviewStatus).
 const taskListCacheTtlMs = 15_000;
 const reviewListCacheTtlMs = 20_000;
 const statisticsCacheTtlMs = 30_000;
+const reconciliationReviewThresholdAmount = 200;
 
 type PageEnvelope = {
   ok?: boolean;
@@ -216,12 +218,42 @@ export function formulaChecksReady(task: Pick<StoredTask, "differenceCheck" | "r
     && terminal.has(task.reasonablenessCheck ?? "");
 }
 
+export function resolveTaskCompletionStatus(
+  task: Pick<StoredTask, "differenceCheck" | "reasonablenessCheck" | "differenceAmount">,
+  issueCount: number,
+) {
+  if (task.differenceCheck !== "通过") return "失败";
+  return issueCount > 0
+    || task.reasonablenessCheck === "不通过"
+    || Math.abs(task.differenceAmount ?? 0) > reconciliationReviewThresholdAmount
+    ? "待审核"
+    : "已一致";
+}
+
 function invalidateTaskReadCaches() {
   invalidateReadCache(["tasks:", "stats:"]);
 }
 
 function invalidateReviewReadCaches() {
   invalidateReadCache(["reviews:", "tasks:", "stats:"]);
+}
+
+function normalizedFileName(task: Pick<StoredTask, "settlementFile" | "name">) {
+  return (task.settlementFile?.name ?? task.name ?? "").normalize("NFKC").trim().toUpperCase();
+}
+
+export function findSupersededTaskRecords(current: StoredTask, candidates: StoredTask[]) {
+  const currentFile = normalizedFileName(current);
+  const currentCreatedAt = Date.parse(current.createdAt);
+  if (!current.shopNo || !current.period || !currentFile || !Number.isFinite(currentCreatedAt)) return [];
+  return candidates.filter((task) => (
+    task.id !== current.id
+    && task.status === "NEEDS_REVIEW"
+    && task.shopNo === current.shopNo
+    && task.period === current.period
+    && normalizedFileName(task) === currentFile
+    && Date.parse(task.createdAt) <= currentCreatedAt
+  ));
 }
 
 async function recordUpsert(tableId: string, values: Record<string, unknown>, recordId?: string) {
@@ -347,6 +379,28 @@ async function listPage(params: { offset: number; limit: number; statuses: strin
   return await runLarkCli<PageEnvelope>(args);
 }
 
+async function listTaskRecordsByShopPeriod(shopNo: string, period: string) {
+  const tasks: StoredTask[] = [];
+  const limit = 200;
+  for (let offset = 0; ; offset += limit) {
+    const args = [
+      "base", "+record-list",
+      "--base-token", config.lark.baseToken,
+      "--table-id", config.lark.taskTableId,
+      "--filter-json", JSON.stringify({ logic: "and", conditions: [["店铺号", "==", shopNo], ["账期", "==", period]] }),
+      "--sort-json", JSON.stringify([{ field: "创建时间", desc: true }]),
+      "--offset", String(offset),
+      "--limit", String(limit),
+      "--format", "json",
+      "--as", "user",
+    ];
+    for (const field of taskFields) args.push("--field-id", field);
+    const page = await runLarkCli<PageEnvelope>(args);
+    tasks.push(...rowsFromPage(page).map(taskFromRow));
+    if (!page.data?.has_more) return tasks;
+  }
+}
+
 async function dataQuery(dsl: Record<string, unknown>) {
   return runLarkCli<DataQueryEnvelope>([
     "base", "+data-query", "--base-token", config.lark.baseToken,
@@ -408,9 +462,10 @@ export async function listTaskRecords(params: { page: number; pageSize: number; 
 }
 
 export async function createReviewRecords(task: StoredTask, issues: CherryIssue[]) {
-  if (!issues.length) return [];
+  const uniqueIssues = uniqueActionableIssues(issues);
+  if (!uniqueIssues.length) return [];
   const fields = ["明细标题", "关联任务", "任务ID", "店铺号", "差异金额", "差异描述", "处理建议", "审核结果"];
-  const rows = issues.map((issue, index) => [
+  const rows = uniqueIssues.map((issue, index) => [
     asText(issue.rowLabel ?? issue.fieldName) || `第 ${index + 1} 条差异`,
     [{ id: task.id }],
     task.taskId,
@@ -463,16 +518,40 @@ export async function applyTaskResult(recordId: string, batchId: string, result:
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   if (!verified || verified.status !== "PROCESSING" || verified.batchId !== batchId) return false;
-  const checksPassed = verified.differenceCheck === "通过" && verified.reasonablenessCheck === "通过";
-  const status = !checksPassed ? "失败" : Math.abs(verified.differenceAmount ?? 0) <= 0.005 ? "已一致" : "待审核";
+  const actionableIssues = uniqueActionableIssues(result.issues);
+  const status = resolveTaskCompletionStatus(verified, actionableIssues.length);
   await updateTaskRecord(recordId, {
     状态: status,
     完成时间: formatDateTime(new Date()),
-    失败原因: checksPassed ? null : `飞书公式校验未通过：差额校验=${verified.differenceCheck ?? "未生成"}，合理性校验=${verified.reasonablenessCheck ?? "未生成"}`,
+    失败原因: status === "失败" ? `飞书差额校验未通过：差额校验=${verified.differenceCheck ?? "未生成"}，合理性校验=${verified.reasonablenessCheck ?? "未生成"}` : null,
   });
   const completed = await getTaskRecord(recordId);
-  if (completed && status === "待审核") await createReviewRecords(completed, result.issues);
+  if (completed && status === "待审核") await createReviewRecords(completed, actionableIssues);
+  if (completed && status !== "失败") await obsoleteSupersededTaskRecords(completed);
   return true;
+}
+
+export async function obsoleteSupersededTaskRecords(current: StoredTask) {
+  const candidates = await listTaskRecordsByShopPeriod(current.shopNo ?? "", current.period ?? "");
+  const superseded = findSupersededTaskRecords(current, candidates);
+  for (const task of superseded) {
+    await markTaskObsolete(task.id, `同店同账期同结算文件已有更新任务 ${current.taskId}，旧任务作废。`);
+  }
+  return superseded.map((task) => task.id);
+}
+
+export function uniqueActionableIssues(issues: CherryIssue[]) {
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    const message = asText(issue.message);
+    if (!message) return false;
+    const title = asText(issue.rowLabel ?? issue.fieldName);
+    const amount = asNumber(issue.differenceAmount);
+    const key = `${title}|${amount ?? ""}|${message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export async function failTaskRecord(recordId: string, batchId: string, message: string) {
@@ -522,6 +601,91 @@ export async function updateReviewRecord(taskId: string, itemId: string, status:
   const allDone = reviews.length > 0 && reviews.every((review) => review.id === itemId ? status !== "PENDING" : review.status !== "PENDING");
   if (allDone && task.status === "NEEDS_REVIEW") await updateTaskRecord(taskId, { 状态: "已审核" });
   if (!allDone && task.status === "REVIEWED") await updateTaskRecord(taskId, { 状态: "待审核" });
+  return true;
+}
+
+export async function approveTaskPendingReviews(taskId: string, note: string) {
+  const task = await getTaskRecord(taskId);
+  if (!task) return false;
+  const reviews = await listTaskReviewRecords(task);
+  const pendingReviews = reviews.filter((review) => review.status === "PENDING");
+  if (!pendingReviews.length) return false;
+
+  const now = formatDateTime(new Date());
+  for (const review of pendingReviews) {
+    await recordUpsert(config.lark.reviewTableId, {
+      审核结果: "已通过",
+      审核备注: note,
+      审核时间: now,
+    }, review.id);
+  }
+  invalidateReviewReadCaches();
+  if (task.status === "NEEDS_REVIEW") await updateTaskRecord(taskId, { 状态: "已审核" });
+  return true;
+}
+
+const scopeMismatchSuggestion = "不要按 ERP 全店汇总或不可比口径差额直接定责；请补充 ERP 合同/专柜/铺位/活动范围键，或核对结算单扣点、其他扣率、变扣和费用扣减后再按同范围复核。";
+
+function appendReviewMessage(message: string, note: string) {
+  if (!message) return note;
+  return message.includes(note) ? message : `${message} ${note}`;
+}
+
+function markRawAgentScopeMismatch(rawAgentJson: string | null, note: string) {
+  if (!rawAgentJson) return null;
+  try {
+    const payload = JSON.parse(rawAgentJson) as Record<string, unknown>;
+    return JSON.stringify({
+      ...payload,
+      issues: appendReviewMessage(asText(payload.issues), note),
+      scopedErpMismatch: true,
+    });
+  } catch {
+    return rawAgentJson;
+  }
+}
+
+export async function markTaskPendingReviewsScopeMismatch(taskId: string, note: string) {
+  const task = await getTaskRecord(taskId);
+  if (!task) return false;
+  const reviews = await listTaskReviewRecords(task);
+  const pendingReviews = reviews.filter((review) => review.status === "PENDING");
+  if (!pendingReviews.length) return false;
+
+  for (const review of pendingReviews) {
+    await recordUpsert(config.lark.reviewTableId, {
+      差异金额: null,
+      差异描述: appendReviewMessage(review.message, note),
+      处理建议: scopeMismatchSuggestion,
+    }, review.id);
+  }
+
+  const rawAgentJson = markRawAgentScopeMismatch(task.rawAgentJson, note);
+  if (rawAgentJson && rawAgentJson !== task.rawAgentJson) {
+    await updateTaskRecord(task.id, { Agent原始JSON: rawAgentJson });
+  }
+  invalidateReviewReadCaches();
+  return true;
+}
+
+export async function markTaskObsolete(taskId: string, note: string) {
+  const task = await getTaskRecord(taskId);
+  if (!task || ["QUEUED", "PROCESSING"].includes(task.status)) return false;
+  const now = formatDateTime(new Date());
+  const reviews = await listTaskReviewRecords(task);
+  for (const review of reviews.filter((item) => item.status === "PENDING")) {
+    await recordUpsert(config.lark.reviewTableId, {
+      审核结果: "已忽略",
+      审核备注: note,
+      审核时间: now,
+    }, review.id);
+  }
+  await updateTaskRecord(taskId, {
+    状态: "已作废",
+    取消原因: note,
+    完成时间: now,
+  });
+  invalidateReviewReadCaches();
   return true;
 }
 
