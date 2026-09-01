@@ -559,7 +559,7 @@ export function rebuildBatchGroups(state: BatchState) {
       : null);
     const erpSalesTotal = groupResult?.erpSalesTotal ?? splitSalesMatch?.erpSalesTotal ?? consistentGroupErpAmount(documents);
     const differenceAmount = groupResult?.differenceAmount ?? (settlementAmount !== null && erpSalesTotal !== null ? roundMoney(erpSalesTotal - settlementAmount) : null);
-    const autoMatched = shouldAutoMatchSplitGroup(documents, settlementAmount, erpSalesTotal, differenceAmount);
+    const autoMatched = groupResult ? false : shouldAutoMatchSplitGroup(documents, settlementAmount, erpSalesTotal, differenceAmount);
     if (autoMatched) {
       for (const document of documents) {
         const salesAmount = splitSalesMatch?.documentAmounts.get(document.id);

@@ -593,6 +593,7 @@ export async function updateReviewRecord(taskId: string, itemId: string, status:
   await recordUpsert(config.lark.reviewTableId, {
     审核结果: apiToReviewStatus[status],
     审核时间: status === "PENDING" ? null : formatDateTime(new Date()),
+    审核备注: status === "PENDING" ? null : undefined,
   }, itemId);
   invalidateReviewReadCaches();
   const task = await getTaskRecord(taskId);

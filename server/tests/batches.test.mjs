@@ -132,6 +132,51 @@ test("combined task group result is counted once", () => {
   assert.equal(state.groups[0].differenceAmount, -25.62);
 });
 
+test("keeps combined task group review even when the group difference is within threshold", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      {
+        id: "doc-a",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: null,
+        groupSettlementAmount: 98794.47,
+        groupErpSalesTotal: 98768.85,
+        erpSalesTotal: 98768.85,
+        taskId: "rec-a",
+        issues: ["ERP聚合范围与结算单范围不一致，范围不可比。"],
+      },
+      {
+        id: "doc-b",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: null,
+        groupSettlementAmount: 98794.47,
+        groupErpSalesTotal: 98768.85,
+        erpSalesTotal: 98768.85,
+        taskId: "rec-a",
+        issues: ["ERP聚合范围与结算单范围不一致，范围不可比。"],
+      },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+  assert.deepEqual(state.documents.map((document) => document.status), ["NEEDS_REVIEW", "NEEDS_REVIEW"]);
+  assert.match(state.groups[0].issues.join(" "), /范围不可比/);
+});
+
 test("auto-resolves split documents when a matched sibling already succeeded", () => {
   const state = {
     id: "batch-1",

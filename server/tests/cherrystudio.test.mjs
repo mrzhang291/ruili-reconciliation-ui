@@ -315,6 +315,27 @@ test("keeps top payment amounts on sales_total when deductions lead to invoice a
   assert.deepEqual(result?.issues, []);
 });
 
+test("requires review for matched non-positive settlement totals", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: -584,
+    settlementAmountLabel: "本期实销金额（两份结算单合计）",
+    salesTotal: -584,
+    netSalesTotal: -513.92,
+    erpBasis: "sales_total",
+    erpAmount: -584,
+    difference: 0,
+    matched: true,
+    basisReason: "两份同店同账期结算单合计的本期实销金额为-584.00元；含税结账金额-522.68，应付款-617.10，存在手续费和快递费。",
+    issues: "",
+  })));
+
+  assert.equal(result?.matched, false);
+  assert.equal(result?.erpBasis, "sales_total");
+  assert.equal(result?.difference, 0);
+  assert.match(result?.issues[0].message ?? "", /0 或负数/);
+  assert.match(result?.issues[0].message ?? "", /扣点后差额 70\.08 元/);
+});
+
 test("keeps invoice labels on net_sales_total even when sales_total is closer", () => {
   const result = parseAgentResponse(JSON.stringify(contractResult({
     settlementAmount: 270991.7,
@@ -454,6 +475,7 @@ test("keeps Agent artifacts inside the task work directory", () => {
   assert.match(prompt, /matched/);
   assert.match(prompt, /sales_total 表示扣点前销售额/);
   assert.match(prompt, /顶部金额与 ERP\/DRP sales_total 在 200 元内对平/);
+  assert.match(prompt, /本期实销\/销售额为 0 或负数/);
 });
 
 test("multi-file reconciliation prompt requires one combined result", () => {
