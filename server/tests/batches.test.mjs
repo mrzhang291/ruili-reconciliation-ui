@@ -4,6 +4,7 @@ import { buildBatchExecutionGroups, buildBatchExportCsv, mergeTargetDocumentsFor
 import {
   applyDocumentTaskInterrupted,
   applyDocumentTaskStarted,
+  parseManualSettlementAmount,
   settledDocumentIssues,
   unresolvedSplitGroupScopeReviewNote,
   validateBatchSettlementUpload,
@@ -455,6 +456,16 @@ test("settled batch documents show task review reasons instead of precheck hints
 
   assert.deepEqual(issues, ["总差额（差额 301.00）：所选口径差额超过阈值"]);
   assert.deepEqual(settledDocumentIssues(["执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额"], "SUCCEEDED"), []);
+});
+
+test("manual settlement amount accepts zero and negative values", () => {
+  assert.equal(parseManualSettlementAmount("-584.12"), -584.12);
+  assert.equal(parseManualSettlementAmount(0), 0);
+  assert.equal(parseManualSettlementAmount("¥1,234.56"), 1234.56);
+  assert.equal(parseManualSettlementAmount(""), null);
+  assert.equal(parseManualSettlementAmount(null), null);
+  assert.equal(parseManualSettlementAmount(false), null);
+  assert.equal(parseManualSettlementAmount("abc"), null);
 });
 
 test("batch upload validation rejects decoded and mojibake detail files", () => {

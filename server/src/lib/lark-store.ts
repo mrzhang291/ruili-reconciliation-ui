@@ -47,7 +47,7 @@ type DataQueryEnvelope = {
   ok?: boolean;
   data?: { main_data?: Array<Record<string, { value?: unknown }>> };
 };
-type Attachment = { file_token?: string; fileToken?: string; token?: string; name?: string; size?: number };
+type Attachment = { file_token?: string; fileToken?: string; token?: string; name?: string; size?: number; names?: string[] };
 
 export type StoredTask = {
   id: string;
@@ -119,10 +119,12 @@ export const asAttachment = (value: unknown): Attachment | null => {
   const sizes = attachments
     .map((item) => item.size)
     .filter((size): size is number => typeof size === "number" && Number.isFinite(size));
+  const names = attachments.map((item) => item.name).filter((name): name is string => Boolean(name));
   return {
     ...attachments[0],
     name: `${attachments[0].name ?? "附件"} 等 ${attachments.length} 份`,
     size: sizes.length ? sizes.reduce((sum, size) => sum + size, 0) : attachments[0].size,
+    names,
   };
 };
 const asUser = (value: unknown) => {
@@ -248,20 +250,21 @@ function invalidateReviewReadCaches() {
   invalidateReadCache(["reviews:", "tasks:", "stats:"]);
 }
 
-function normalizedFileName(task: Pick<StoredTask, "settlementFile" | "name">) {
-  return (task.settlementFile?.name ?? task.name ?? "").normalize("NFKC").trim().toUpperCase();
+function normalizedFileNames(task: Pick<StoredTask, "settlementFile" | "name">) {
+  const names = task.settlementFile?.names?.length ? task.settlementFile.names : [task.settlementFile?.name ?? task.name ?? ""];
+  return names.map((name) => name.normalize("NFKC").trim().toUpperCase()).filter(Boolean);
 }
 
 export function findSupersededTaskRecords(current: StoredTask, candidates: StoredTask[]) {
-  const currentFile = normalizedFileName(current);
+  const currentFiles = normalizedFileNames(current);
   const currentCreatedAt = Date.parse(current.createdAt);
-  if (!current.shopNo || !current.period || !currentFile || !Number.isFinite(currentCreatedAt)) return [];
+  if (!current.shopNo || !current.period || !currentFiles.length || !Number.isFinite(currentCreatedAt)) return [];
   return candidates.filter((task) => (
     task.id !== current.id
     && task.status === "NEEDS_REVIEW"
     && task.shopNo === current.shopNo
     && task.period === current.period
-    && normalizedFileName(task) === currentFile
+    && normalizedFileNames(task).some((fileName) => currentFiles.includes(fileName))
     && Date.parse(task.createdAt) <= currentCreatedAt
   ));
 }
@@ -528,6 +531,15 @@ export async function applyTaskResult(recordId: string, batchId: string, result:
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   if (!verified || verified.status !== "PROCESSING" || verified.batchId !== batchId) return false;
+  if (!formulaChecksReady(verified)) {
+    const reason = `飞书公式校验超时：差额校验=${verified.differenceCheck ?? "未生成"}，合理性校验=${verified.reasonablenessCheck ?? "未生成"}`;
+    await updateTaskRecord(recordId, {
+      状态: "失败",
+      完成时间: formatDateTime(new Date()),
+      失败原因: reason,
+    });
+    throw new Error(reason);
+  }
   const actionableIssues = uniqueActionableIssues(result.issues);
   const status = resolveTaskCompletionStatus(verified, actionableIssues.length);
   await updateTaskRecord(recordId, {

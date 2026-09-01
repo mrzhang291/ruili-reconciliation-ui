@@ -59,6 +59,20 @@ function errorPayload(code: string, message: string) {
   return { error: { code, message, requestId: crypto.randomUUID() } };
 }
 
+export function parseManualSettlementAmount(value: unknown) {
+  let amount: number;
+  if (typeof value === "number") {
+    amount = value;
+  } else if (typeof value === "string") {
+    const normalized = value.trim().replace(/[￥¥,\s元]/g, "");
+    if (!normalized) return null;
+    amount = Number(normalized);
+  } else {
+    return null;
+  }
+  return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
+}
+
 function parseAgentSelector(body: unknown): { name: string; workspace?: string } | UploadError {
   const payload = body as Record<string, unknown> | undefined;
   const name = typeof payload?.agentName === "string" && payload.agentName.trim()
@@ -159,7 +173,7 @@ batchesRouter.patch("/documents/:documentId/amount", async (req, res, next) => {
     if (!found) return res.status(404).json(errorPayload("DOCUMENT_NOT_FOUND", "未找到批量结算单明细"));
     const { state, document } = found;
     const candidateId = typeof req.body?.candidateId === "string" ? req.body.candidateId : "";
-    const manualAmount = typeof req.body?.amount === "number" ? req.body.amount : Number(req.body?.amount);
+    const manualAmount = parseManualSettlementAmount(req.body?.amount);
     const manualLabel = typeof req.body?.label === "string" && req.body.label.trim() ? req.body.label.trim() : "人工确认金额";
 
     if (candidateId) {
@@ -168,12 +182,12 @@ batchesRouter.patch("/documents/:documentId/amount", async (req, res, next) => {
       document.confirmedCandidateId = candidate.id;
       document.confirmedSettlementAmount = candidate.amount;
       document.confirmedSettlementLabel = candidate.label;
-    } else if (Number.isFinite(manualAmount) && manualAmount > 0) {
+    } else if (manualAmount !== null) {
       document.confirmedCandidateId = null;
-      document.confirmedSettlementAmount = Math.round(manualAmount * 100) / 100;
+      document.confirmedSettlementAmount = manualAmount;
       document.confirmedSettlementLabel = manualLabel;
     } else {
-      return res.status(400).json(errorPayload("INVALID_AMOUNT", "确认金额必须是大于 0 的数字"));
+      return res.status(400).json(errorPayload("INVALID_AMOUNT", "确认金额必须是有效数字"));
     }
 
     document.version += 1;

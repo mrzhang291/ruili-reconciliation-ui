@@ -216,7 +216,15 @@ async function runReconciliation(
     });
 
     const applied = await applyTaskResult(taskId, batchId, result, knowledge.ruleVersions);
-    if (applied) emit(onProgress, "success", `对账完成：${result.name}，权威差额 ${result.difference.toFixed(2)} 元`);
+    if (!applied) {
+      const current = await getTaskRecord(taskId);
+      if (current?.status === "CANCELLED") {
+        await settle("CANCELLED", current.cancelReason ?? "对账任务已由用户停止");
+        return;
+      }
+      throw new Error("对账结果未能完成落库校验，任务状态异常或批次不匹配");
+    }
+    emit(onProgress, "success", `对账完成：${result.name}，权威差额 ${result.difference.toFixed(2)} 元`);
     const completed = await getTaskRecord(taskId);
     await settle(completed?.status ?? "FAILED", completed?.failureReason ?? null);
   } catch (error) {

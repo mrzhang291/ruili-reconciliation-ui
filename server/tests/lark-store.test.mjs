@@ -20,6 +20,7 @@ test("summarizes multi-file settlement attachments without hiding the extra file
     file_token: "file-1",
     name: "WHAD30 -5月结算单1.pdf 等 2 份",
     size: 105287,
+    names: ["WHAD30 -5月结算单1.pdf", "WHAD30 -5月结算单2.pdf"],
   });
 });
 
@@ -90,4 +91,54 @@ test("finds only older pending tasks for the same settlement file", () => {
   ]);
 
   assert.deepEqual(matches.map((item) => item.id), ["older-same", "same-time"]);
+});
+
+test("combined settlement attachments supersede their older split-file tasks", () => {
+  const baseTask = {
+    id: "current",
+    taskId: "TASK-CURRENT",
+    name: null,
+    shopNo: "WHAD30",
+    period: "2026-05",
+    status: "SUCCEEDED",
+    batchId: null,
+    ruleVersions: null,
+    settlementAmount: null,
+    erpAmount: null,
+    differenceAmount: null,
+    agentDifference: null,
+    differenceCheck: null,
+    reasonablenessCheck: null,
+    failureReason: null,
+    cancelReason: null,
+    rawAgentJson: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: "2026-09-01T03:00:00.000Z",
+    createdBy: { id: "u", name: "u" },
+    erpFile: null,
+    reviewIds: [],
+  };
+  const current = {
+    ...baseTask,
+    settlementFile: {
+      name: "WHAD30 -5月结算单1.pdf 等 2 份",
+      names: ["WHAD30 -5月结算单1.pdf", "WHAD30 -5月结算单2.pdf"],
+    },
+  };
+  const old = (name) => ({
+    ...baseTask,
+    id: name,
+    status: "NEEDS_REVIEW",
+    createdAt: "2026-08-31T03:00:00.000Z",
+    settlementFile: { name },
+  });
+
+  const matches = findSupersededTaskRecords(current, [
+    old("WHAD30 -5月结算单1.pdf"),
+    old("WHAD30 -5月结算单2.pdf"),
+    old("WHAD28-5月结算单1.pdf"),
+  ]);
+
+  assert.deepEqual(matches.map((item) => item.id), ["WHAD30 -5月结算单1.pdf", "WHAD30 -5月结算单2.pdf"]);
 });
