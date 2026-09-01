@@ -113,6 +113,31 @@ test("precheck groups same shop-period files into one execution unit", () => {
   assert.equal(units[0].fileName, "WHAD28 2026-05 合并结算单（2份）");
 });
 
+test("precheck groups split-number files even when period is unknown", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-1.pdf" },
+      { id: "doc-b", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-2.pdf" },
+      { id: "doc-c", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-3.pdf" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  rebuildBatchGroups(state);
+  const units = buildBatchExecutionGroups(state);
+
+  assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].period, null);
+  assert.deepEqual(state.groups[0].documentIds, ["doc-a", "doc-b", "doc-c"]);
+  assert.deepEqual(state.documents.map((document) => document.groupId), [state.groups[0].id, state.groups[0].id, state.groups[0].id]);
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b", "doc-c"]);
+  assert.equal(units[0].period, null);
+  assert.equal(units[0].fileName, "NBNK01 账期待识别 合并结算单（3份）");
+});
+
 test("combined task group result is counted once", () => {
   const state = {
     id: "batch-1",

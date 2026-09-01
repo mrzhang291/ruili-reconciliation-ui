@@ -391,7 +391,7 @@ export function BatchReconciliationView() {
                       {activePrecheckResult.groups.map((group) => (
                         <tr key={group.id}>
                           <td className="file-cell">
-                            <strong>{group.shopNo} {group.period}</strong>
+                            <strong>{group.shopNo} {group.period ?? "账期待识别"}</strong>
                             <span>{group.id} · v{group.version}</span>
                           </td>
                           <td>

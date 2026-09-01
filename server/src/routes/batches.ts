@@ -44,7 +44,7 @@ const settlementMimeTypes = new Set([
   "image/png",
   "image/jpeg",
 ]);
-const readinessIssuePattern = /(文件名未识别到主体|文件名包含多个主体|未从文件名识别到账期|Excel 本地金额候选|执行时将按单文件流程)/;
+const readinessIssuePattern = /(文件名未识别到主体|文件名包含多个主体|未从文件名识别到账期|Excel 本地金额候选|执行时将按单文件流程|执行时将由 CherryStudio Agent|执行时将交给 Agent)/;
 
 type UploadError = { code: string; message: string };
 
@@ -425,7 +425,8 @@ async function approveResolvedSplitGroupReviews(state: BatchState, changedDocume
     && Number.isFinite(group.differenceAmount)
   ));
   for (const group of resolvedGroups) {
-    const note = `同批同店同账期拆单合计已匹配：${group.shopNo} ${group.period}，${group.documentCount} 份结算单合计 ${group.settlementAmount?.toFixed(2)} 元，ERP 可比金额 ${group.erpSalesTotal?.toFixed(2)} 元，合计差额 ${group.differenceAmount?.toFixed(2)} 元；单张差额属于拆单范围差，不作为异常。`;
+    const periodLabel = group.period ?? "账期待识别";
+    const note = `同批同店同账期拆单合计已匹配：${group.shopNo} ${periodLabel}，${group.documentCount} 份结算单合计 ${group.settlementAmount?.toFixed(2)} 元，ERP 可比金额 ${group.erpSalesTotal?.toFixed(2)} 元，合计差额 ${group.differenceAmount?.toFixed(2)} 元；单张差额属于拆单范围差，不作为异常。`;
     const taskIds = uniqueTexts(group.documentIds
       .map((documentId) => state.documents.find((document) => document.id === documentId)?.taskId));
     for (const taskId of taskIds) await approveTaskPendingReviews(taskId, note);
@@ -465,7 +466,7 @@ export function unresolvedSplitGroupScopeReviewNote(group: Pick<BatchState["grou
   const settlement = Number.isFinite(group.settlementAmount) ? `${group.settlementAmount?.toFixed(2)} 元` : "未知";
   const erp = Number.isFinite(group.erpSalesTotal) ? `${group.erpSalesTotal?.toFixed(2)} 元` : "组内 ERP 口径/金额不一致";
   const difference = Number.isFinite(group.differenceAmount) ? `组级差额 ${group.differenceAmount?.toFixed(2)} 元` : "无法计算稳定组级差额";
-  return `同批同店同账期拆单未能与 ERP 同范围对齐：${group.shopNo} ${group.period}，${group.documentCount} 份结算单合计 ${settlement}，ERP 可比金额 ${erp}，${difference}；单张 full-shop 差额属于范围差，不作为可结算差额。`;
+  return `同批同店同账期拆单未能与 ERP 同范围对齐：${group.shopNo} ${group.period ?? "账期待识别"}，${group.documentCount} 份结算单合计 ${settlement}，ERP 可比金额 ${erp}，${difference}；单张 full-shop 差额属于范围差，不作为可结算差额。`;
 }
 
 async function precheckSettlementFile(
@@ -524,7 +525,7 @@ async function precheckSettlementFile(
   }
 
   if (status !== "REJECTED" && status !== "DUPLICATE" && !isExcelFileName(fileName)) {
-    issues.push("执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额");
+    issues.push("执行时将由 CherryStudio Agent 抽取结算金额；同店拆分单据会合并后对账");
   }
 
   return [await completePrecheckDocument({
@@ -576,12 +577,12 @@ async function completePrecheckDocument(params: {
       issues.push(`文件名包含多个主体候选（${params.shopCodes.join("、")}），执行时将由 Agent 以结算单正文为准`);
     }
     if (!params.period) {
-      issues.push("未从文件名识别到账期，执行时将按单文件流程从结算单正文抽取");
+      issues.push("未从文件名识别到账期，执行时将由 Agent 从结算单正文抽取");
     }
     if (isExcelFileName(params.fileName) && !chosen) {
       issues.push(amountCandidates.length
-        ? "Excel 本地金额候选不唯一，执行时将按单文件流程交给 Agent 识别"
-        : "Excel 中未识别到净营业额候选，执行时将按单文件流程交给 Agent 识别");
+        ? "Excel 本地金额候选不唯一，执行时将交给 Agent 识别"
+        : "Excel 中未识别到净营业额候选，执行时将交给 Agent 识别");
     }
   }
 
@@ -610,7 +611,7 @@ async function refreshDocumentReadiness(state: BatchState, document: BatchDocume
   document.issues = document.issues.filter((issue) => !readinessIssuePattern.test(issue));
   if (document.status === "REJECTED" || document.status === "DUPLICATE") return;
   if (!document.shopNo) document.issues.push("文件名未识别到主体，执行时将由 Agent 从结算单正文判断");
-  if (!document.period) document.issues.push("未从文件名识别到账期，执行时将按单文件流程从结算单正文抽取");
+  if (!document.period) document.issues.push("未从文件名识别到账期，执行时将由 Agent 从结算单正文抽取");
   document.erpRows = null;
   document.erpSalesTotal = null;
   document.status = "READY";

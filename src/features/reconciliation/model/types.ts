@@ -177,7 +177,7 @@ export type BatchGroupSummary = {
   id: string;
   key: string;
   shopNo: string;
-  period: string;
+  period: string | null;
   documentIds: string[];
   documentCount: number;
   status: BatchPrecheckItemStatus | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";

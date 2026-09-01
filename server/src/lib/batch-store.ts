@@ -74,7 +74,7 @@ export type BatchGroupState = {
   id: string;
   key: string;
   shopNo: string;
-  period: string;
+  period: string | null;
   documentIds: string[];
   documentCount: number;
   status: BatchDocumentStatus;
@@ -84,6 +84,15 @@ export type BatchGroupState = {
   differenceAmount: number | null;
   version: number;
   issues: string[];
+};
+
+type BatchGroupAccumulator = {
+  key: string;
+  shopNo: string;
+  period: string | null;
+  version: number;
+  splitStem: string | null;
+  documents: BatchDocumentState[];
 };
 
 export type BatchState = {
@@ -438,7 +447,7 @@ export function buildBatchExecutionGroups(state: BatchState): BatchExecutionGrou
       documentCount: documents.length,
       shopNo: group.shopNo,
       period: group.period,
-      fileName: `${group.shopNo} ${group.period} 合并结算单（${documents.length}份）`,
+      fileName: `${group.shopNo} ${group.period ?? "账期待识别"} 合并结算单（${documents.length}份）`,
     });
   }
 
@@ -525,25 +534,29 @@ function documentRecordValues(document: BatchDocumentState) {
 
 export function rebuildBatchGroups(state: BatchState) {
   const now = new Date().toISOString();
-  const groups = new Map<string, BatchDocumentState[]>();
+  const groups = new Map<string, BatchGroupAccumulator>();
   for (const document of state.documents) {
     if (document.status === "REJECTED" || document.status === "DUPLICATE") {
       document.groupId = null;
       continue;
     }
-    if (!document.shopNo || !document.period) {
+    const candidate = batchGroupCandidate(document);
+    if (!candidate) {
       document.groupId = null;
       continue;
     }
-    const version = document.version || 1;
-    const key = `${document.shopNo}:${document.period}:v${version}`;
-    groups.set(key, [...(groups.get(key) ?? []), document]);
+    const group = groups.get(candidate.key) ?? { ...candidate, documents: [] };
+    group.documents.push(document);
+    groups.set(candidate.key, group);
   }
 
-  state.groups = [...groups.entries()].map(([key, documents]) => {
-    const [shopNo, period, versionLabel] = key.split(":");
-    const version = Number(versionLabel.replace(/^v/, "")) || 1;
-    const id = `${state.id}-${shopNo}-${period.replace("-", "")}-v${version}`;
+  state.groups = [...groups.values()].flatMap((group) => {
+    if (!group.period && group.documents.length <= 1) {
+      for (const document of group.documents) document.groupId = null;
+      return [];
+    }
+    const { key, shopNo, period, version, documents } = group;
+    const id = `${state.id}-${shopNo}-${period ? period.replace("-", "") : `pending-${shortHash(group.splitStem ?? key)}`}-v${version}`;
     for (const document of documents) document.groupId = id;
     const statuses = documents.map((document) => document.status);
     const status: BatchDocumentStatus = statuses.includes("PROCESSING") ? "PROCESSING"
@@ -573,7 +586,7 @@ export function rebuildBatchGroups(state: BatchState) {
         document.updatedAt = now;
       }
     }
-    return {
+    return [{
       id,
       key,
       shopNo,
@@ -587,7 +600,7 @@ export function rebuildBatchGroups(state: BatchState) {
       differenceAmount,
       version,
       issues: autoMatched ? [] : [...new Set(documents.flatMap((document) => document.issues))],
-    };
+    }];
   });
 
   const statuses = state.documents.map((document) => document.status);
@@ -598,6 +611,47 @@ export function rebuildBatchGroups(state: BatchState) {
           : statuses.some((status) => status === "NEEDS_REVIEW") ? "NEEDS_REVIEW"
             : statuses.some((status) => status === "SUCCEEDED") ? "COMPLETED"
               : "DRAFT";
+}
+
+function batchGroupCandidate(document: BatchDocumentState): Omit<BatchGroupAccumulator, "documents"> | null {
+  if (!document.shopNo) return null;
+  const version = document.version || 1;
+  if (document.period) {
+    return {
+      key: `${document.shopNo}:${document.period}:v${version}`,
+      shopNo: document.shopNo,
+      period: document.period,
+      version,
+      splitStem: null,
+    };
+  }
+
+  const splitStem = splitFileGroupStem(document.fileName);
+  const normalizedShopNo = document.shopNo.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
+  if (!splitStem || !splitStem.toUpperCase().includes(normalizedShopNo)) return null;
+  return {
+    key: `${document.shopNo}:pending:${splitStem}:v${version}`,
+    shopNo: document.shopNo,
+    period: null,
+    version,
+    splitStem,
+  };
+}
+
+function splitFileGroupStem(fileName: string) {
+  const stem = path.basename(fileName, path.extname(fileName)).normalize("NFKC").replace(/\s+/g, "");
+  const part = "(?:part)?([0-9]+|[一二三四五六七八九十]+)";
+  const separated = new RegExp(`^(.+?)[-_－—]+(?:第)?${part}(?:份|张|页|部分|part)?$`, "i").exec(stem);
+  const suffixed = new RegExp(`^(.+?结算单)(?:第)?${part}(?:份|张|页|部分|part)?$`, "i").exec(stem);
+  const match = separated ?? suffixed;
+  if (!match) return null;
+  const numericPart = match[2];
+  if (/^\d+$/.test(numericPart) && Number(numericPart) > 50) return null;
+  return match[1].toUpperCase();
+}
+
+function shortHash(value: string) {
+  return crypto.createHash("sha1").update(value).digest("hex").slice(0, 8);
 }
 
 function moneyCents(value: number) {
