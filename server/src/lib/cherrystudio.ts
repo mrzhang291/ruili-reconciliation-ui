@@ -923,9 +923,6 @@ function validateAgentArithmetic(payload: AgentReconciliationPayload) {
       ? `ERP/结算单当前口径或范围不可比，直接相减为 ${selected.difference.toFixed(2)} 元；该数仅用于定位问题，不作为可结算差额。`
       : `所选口径差额 ${selected.difference.toFixed(2)} 元，超过 ${reconciliationReviewThresholdAmount.toFixed(2)} 元阈值。`);
   }
-  if (requiresNonPositiveSettlementReview(payload, selected.basis)) {
-    reviewMessages.push("结算单合并后销售/结算金额为 0 或负数，属于退货、冲减或费用调整场景；即使 ERP 金额一致，也需人工确认对账口径。");
-  }
   if (!payload.matched && !reviewMessages.length) {
     reviewMessages.push("Agent 标记本次对账未一致。");
   }
@@ -976,13 +973,6 @@ function isZeroSalesFeeStatement(payload: AgentReconciliationPayload, preferredB
   const evidence = `${payload.settlementAmountLabel} ${payload.basisReason} ${payload.issues}`.normalize("NFKC");
   return /(?:销售(?:金额|额|数量)?(?:为|是)?0|0(?:元)?销售|零销售|无销售)/.test(evidence)
     && /(?:费用|扣款|扣减|佣金|开票|发票|应付小写|补扣|调整)/.test(evidence);
-}
-
-function requiresNonPositiveSettlementReview(payload: AgentReconciliationPayload, selectedBasis: Exclude<AgentErpBasis, "ambiguous">) {
-  if (toCents(payload.settlementAmount) > 0) return false;
-  const evidence = `${payload.settlementAmountLabel} ${payload.basisReason} ${payload.issues}`.normalize("NFKC");
-  return selectedBasis === "sales_total"
-    || /(?:退货|退款|冲减|费用|扣款|扣减|手续费|快递费|应付款|开票数量\s*[:：]?\s*-)/.test(evidence);
 }
 
 function formatBackendReviewMessage(

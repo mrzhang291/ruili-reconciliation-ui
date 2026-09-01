@@ -157,6 +157,8 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.doesNotMatch(reviewHook, /reconciliationApi\.listTasks/);
   assert.match(overview, /window\.confirm/);
   assert.match(overview, /record\.name/);
+  assert.match(overview, /ERP金额/);
+  assert.match(overview, /待审核/);
   assert.match(app, /BatchReconciliationView/);
   assert.match(app, /ErpDetailsView/);
   assert.match(app, /ErpImportView/);

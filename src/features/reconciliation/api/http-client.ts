@@ -80,6 +80,7 @@ type RawSummary = {
     settlementAmount: string | null;
     erpAmount: string | null;
     differenceAmount: string | null;
+    scopeMismatch?: boolean;
   };
   createdAt: string;
   completedAt: string | null;
@@ -169,6 +170,7 @@ function toSummary(raw: RawSummary): ReconciliationTaskSummary {
       totalCount: null,
       matchedCount: null,
       differenceCount: null,
+      scopeMismatch: raw.metrics.scopeMismatch === true,
     },
     createdAt: raw.createdAt,
     completedAt: raw.completedAt,

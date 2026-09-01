@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findCreatedRecordId, findSupersededTaskRecords, formulaChecksReady, isLarkRecordId, resolveTaskCompletionStatus, rowsFromPage, uniqueActionableIssues } from "../dist/lib/lark-store.js";
+import { asAttachment, findCreatedRecordId, findSupersededTaskRecords, formulaChecksReady, isLarkRecordId, resolveTaskCompletionStatus, rowsFromPage, uniqueActionableIssues } from "../dist/lib/lark-store.js";
 
 test("reads the record ID returned by lark-cli record-upsert", () => {
   assert.equal(findCreatedRecordId({ data: { record: { record_id_list: ["recvsUgd2jAPoR"] } } }), "recvsUgd2jAPoR");
@@ -10,6 +10,17 @@ test("ignores tombstone rows returned for deleted Feishu records", () => {
   assert.deepEqual(rowsFromPage({ data: {
     data: [[null]], fields: ["任务ID"], record_id_list: ["rec_deleted"], record_not_found: ["rec_deleted"],
   } }), []);
+});
+
+test("summarizes multi-file settlement attachments without hiding the extra files", () => {
+  assert.deepEqual(asAttachment([
+    { file_token: "file-1", name: "WHAD30 -5月结算单1.pdf", size: 53049 },
+    { file_token: "file-2", name: "WHAD30 -5月结算单2.pdf", size: 52238 },
+  ]), {
+    file_token: "file-1",
+    name: "WHAD30 -5月结算单1.pdf 等 2 份",
+    size: 105287,
+  });
 });
 
 test("waits until Feishu formula checks leave their pending state", () => {

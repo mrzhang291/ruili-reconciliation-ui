@@ -111,9 +111,19 @@ const asDateTime = (value: unknown) => {
 const asLinks = (value: unknown) => Array.isArray(value)
   ? value.flatMap((item) => item && typeof item === "object" && "id" in item && typeof item.id === "string" ? [item.id] : [])
   : [];
-const asAttachment = (value: unknown): Attachment | null => {
-  const item = Array.isArray(value) ? value[0] : null;
-  return item && typeof item === "object" ? item as Attachment : null;
+export const asAttachment = (value: unknown): Attachment | null => {
+  const attachments = (Array.isArray(value) ? value : [])
+    .filter((item): item is Attachment => Boolean(item) && typeof item === "object");
+  if (!attachments.length) return null;
+  if (attachments.length === 1) return attachments[0];
+  const sizes = attachments
+    .map((item) => item.size)
+    .filter((size): size is number => typeof size === "number" && Number.isFinite(size));
+  return {
+    ...attachments[0],
+    name: `${attachments[0].name ?? "附件"} 等 ${attachments.length} 份`,
+    size: sizes.length ? sizes.reduce((sum, size) => sum + size, 0) : attachments[0].size,
+  };
 };
 const asUser = (value: unknown) => {
   const item = Array.isArray(value) ? value[0] : value;

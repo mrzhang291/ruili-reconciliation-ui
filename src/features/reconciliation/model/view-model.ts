@@ -26,7 +26,7 @@ export type ReconciliationView = {
 
 export const statusLabels: Record<DisplayStatus, string> = {
   success: "对账成功",
-  issue: "存在差异",
+  issue: "待审核",
   reviewed: "已复核",
   failed: "对账失败",
   processing: "对账中",
@@ -86,8 +86,8 @@ export function toViewModel(task: ReconciliationTaskSummary): ReconciliationView
     settlement: task.settlementFile.name,
     erp: task.erpFile.name,
     amount: formatMoney(task.metrics.settlementAmount, isPending ? "待计算" : "—"),
-    matched: total === null || matched === null ? (isPending ? "正在解析" : "—") : `${matched.toLocaleString()} / ${total.toLocaleString()}`,
-    variance: task.metrics.scopeMismatch ? "范围不可比" : formatMoney(task.metrics.differenceAmount),
+    matched: total === null || matched === null ? formatMoney(task.metrics.erpAmount, isPending ? "正在解析" : "—") : `${matched.toLocaleString()} / ${total.toLocaleString()}`,
+    variance: formatMoney(task.metrics.differenceAmount),
     status: displayStatus(task.status),
     time: formatTaskTime(task.createdAt),
     owner: task.createdBy.name,

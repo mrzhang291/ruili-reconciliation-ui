@@ -79,7 +79,7 @@ export function OverviewView() {
 
         <div className="filter-tabs" role="tablist" aria-label="按状态筛选">
           {([
-            ["all", "全部", counts.all], ["success", "成功", counts.success], ["issue", "有差异", counts.issue],
+            ["all", "全部", counts.all], ["success", "成功", counts.success], ["issue", "待审核", counts.issue],
             ["failed", "失败", counts.failed], ["processing", "进行中", counts.processing],
             ["cancelled", "已停止", counts.cancelled],
           ] as const).map(([value, label, count]) => (
@@ -91,7 +91,7 @@ export function OverviewView() {
 
         <div className="table-wrap">
           <table>
-            <thead><tr><th>店铺号 / 账期</th><th>文件</th><th>结算金额</th><th>匹配条目</th><th>差异金额</th><th>状态</th><th>执行时间</th><th aria-label="操作" /></tr></thead>
+            <thead><tr><th>店铺号 / 账期</th><th>文件</th><th>结算金额</th><th>ERP金额</th><th>差异金额</th><th>状态</th><th>执行时间</th><th aria-label="操作" /></tr></thead>
             <tbody>
               {records.map((record) => (
                 <tr key={record.id} onClick={() => void openDetails(record.id)}>

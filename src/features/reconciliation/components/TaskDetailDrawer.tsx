@@ -19,7 +19,7 @@ export function TaskDetailDrawer({ selected, onClose }: TaskDetailDrawerProps) {
         <dl>
           <div><dt>任务编号</dt><dd>{selected.id}</dd></div>
           <div><dt>账期</dt><dd>{selected.period}</dd></div>
-          <div><dt>匹配条目</dt><dd>{selected.matched}</dd></div>
+          <div><dt>ERP金额</dt><dd>{selected.matched}</dd></div>
           <div><dt>差异金额</dt><dd>{selected.variance}</dd></div>
           <div><dt>执行人</dt><dd>{selected.owner}</dd></div>
           <div><dt>结算单</dt><dd>{selected.settlement}</dd></div>
