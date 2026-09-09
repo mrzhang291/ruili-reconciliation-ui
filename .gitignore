@@ -13,10 +13,10 @@
 # testing
 /coverage
 
-# next.js
-/.next/
-/.vinext/
+# build output
 /out/
+/dist/
+/release/
 
 # misc
 .DS_Store
@@ -32,11 +32,49 @@ yarn-error.log*
 .env*
 !.env.example
 
-# vercel
-.vercel
-
-/dist/
-/.wrangler/
 /outputs/
 /work/
+/recon/
+/reconciliation_tmp/
+/msgs.json
+/sessions_raw.json
+/*agents.json
+/.claude/skills/
 *.tsbuildinfo
+
+# 对账测试数据（含财务信息，不提交）
+/账目*.pdf
+/账目*.xlsx
+/账目*.xls
+/zhangben*.jpg
+/zhangben*.jpeg
+/zhangben*.png
+/excel_content.txt
+
+# 本地测试与临时产物（兼容旧脚本；新代码统一写入 .runtime）
+**/__pycache__/
+/bills/
+/erp*.xlsx
+/settlement*.pdf
+/render_parts/
+/*_render.png
+/memory/
+/mineru_*.txt
+/*_output.md
+/*_error.txt
+/settlement_output*.md
+/账单*.md
+/账单*.pdf
+/账单*.xlsx
+
+# 本地运行数据：日志、上传原件、每次扫描的临时工作目录
+/.runtime/
+
+# 旧版本后端上传目录（可能包含财务数据）
+/server/data/
+/server/node_modules/
+/server/dist/
+/server/*.log
+/server-delete-feature*.log
+/server-runtime*.log
+/frontend-runtime*.log

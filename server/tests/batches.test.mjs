@@ -1,0 +1,523 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { buildBatchExecutionGroups, buildBatchExportCsv, mergeTargetDocumentsForSync, rebuildBatchGroups } from "../dist/lib/batch-store.js";
+import {
+  applyDocumentTaskInterrupted,
+  applyDocumentTaskStarted,
+  parseManualSettlementAmount,
+  settledDocumentIssues,
+  unresolvedSplitGroupScopeReviewNote,
+  validateBatchSettlementUpload,
+} from "../dist/routes/batches.js";
+
+test("marks pending batch documents as processing when a task starts", () => {
+  const document = { status: "READY", taskId: null, updatedAt: "old" };
+  applyDocumentTaskStarted(document, "rec123", "now");
+  assert.deepEqual(document, { status: "PROCESSING", taskId: "rec123", updatedAt: "now" });
+});
+
+test("does not downgrade settled batch documents when a fast task has already completed", () => {
+  const document = { status: "SUCCEEDED", taskId: "rec123", updatedAt: "done" };
+  applyDocumentTaskStarted(document, "rec123", "later");
+  assert.deepEqual(document, { status: "SUCCEEDED", taskId: "rec123", updatedAt: "later" });
+});
+
+test("releases interrupted batch documents for retry", () => {
+  const document = { status: "PROCESSING", taskId: "rec123", issues: [], updatedAt: "old" };
+  assert.equal(applyDocumentTaskInterrupted(document, "服务重启后恢复", "now"), true);
+  assert.deepEqual(document, {
+    status: "READY",
+    taskId: null,
+    issues: ["服务重启后恢复"],
+    updatedAt: "now",
+  });
+});
+
+test("targeted batch sync preserves newer statuses from the latest batch state", () => {
+  const stale = {
+    id: "batch-1",
+    recordId: null,
+    documents: [
+      { id: "doc-a", status: "PROCESSING", taskId: "rec-a" },
+      { id: "doc-b", status: "PROCESSING", taskId: "rec-b" },
+    ],
+  };
+  const latest = {
+    id: "batch-1",
+    recordId: "rec-batch",
+    documents: [
+      { id: "doc-a", status: "SUCCEEDED", taskId: "rec-a" },
+      { id: "doc-b", status: "READY", taskId: null },
+    ],
+  };
+
+  const merged = mergeTargetDocumentsForSync(stale, ["doc-b"], latest);
+
+  assert.equal(merged.recordId, "rec-batch");
+  assert.equal(merged.documents[0].status, "SUCCEEDED");
+  assert.equal(merged.documents[1].status, "PROCESSING");
+});
+
+test("mixed succeeded and cancelled documents do not mark the batch completed", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "SUCCEEDED", shopNo: "NJAD01", period: "2026-05", version: 1, confirmedSettlementAmount: 10, erpSalesTotal: 10, taskId: "rec-a", issues: [] },
+      { id: "doc-b", status: "CANCELLED", shopNo: "NJAD02", period: "2026-05", version: 1, confirmedSettlementAmount: 20, erpSalesTotal: null, taskId: "rec-b", issues: [] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "CANCELLED");
+});
+
+test("auto-resolves split documents when the shop-period group total matches ERP", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 69517.25, erpSalesTotal: 98768.85, taskId: "rec-a", issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 29277.22, erpSalesTotal: 98768.85, taskId: "rec-b", issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "COMPLETED");
+  assert.equal(state.groups[0].status, "SUCCEEDED");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+  assert.deepEqual(state.documents.map((document) => document.status), ["SUCCEEDED", "SUCCEEDED"]);
+  assert.deepEqual(state.documents.flatMap((document) => document.issues), []);
+});
+
+test("precheck groups same shop-period files into one execution unit", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "READY", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "WHAD28-5月结算单1.pdf" },
+      { id: "doc-b", status: "READY", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "WHAD28-5月结算单2.pdf" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  rebuildBatchGroups(state);
+  const units = buildBatchExecutionGroups(state);
+
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b"]);
+  assert.equal(units[0].fileName, "WHAD28 2026-05 合并结算单（2份）");
+});
+
+test("precheck does not execute documents pending manual confirmation", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "SZSC19", period: "2026-05", version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: ["文件名含“明细”，需人工确认其是否为结算依据；确认店铺号、账期或金额后再执行"], fileName: "SZSC19-5月明细.pdf.xls" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  assert.deepEqual(buildBatchExecutionGroups(state), []);
+});
+
+test("precheck groups split-number files even when period is unknown", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-1.pdf" },
+      { id: "doc-b", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-2.pdf" },
+      { id: "doc-c", status: "READY", shopNo: "NBNK01", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "NBNK01-3.pdf" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  rebuildBatchGroups(state);
+  const units = buildBatchExecutionGroups(state);
+
+  assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].period, null);
+  assert.deepEqual(state.groups[0].documentIds, ["doc-a", "doc-b", "doc-c"]);
+  assert.deepEqual(state.documents.map((document) => document.groupId), [state.groups[0].id, state.groups[0].id, state.groups[0].id]);
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b", "doc-c"]);
+  assert.equal(units[0].period, null);
+  assert.equal(units[0].fileName, "NBNK01 账期待识别 合并结算单（3份）");
+});
+
+test("precheck groups same-shop files with unrecognized periods despite inconsistent filenames", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "READY", shopNo: "HZAD71", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "HZAD71 (杭州之江银泰百货)0结算单，备注发票号(2).pdf" },
+      { id: "doc-b", status: "READY", shopNo: "HZAD71", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "HZAD71 (杭州之江银泰百货)结算单05.pdf" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  rebuildBatchGroups(state);
+  const units = buildBatchExecutionGroups(state);
+
+  assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].shopNo, "HZAD71");
+  assert.equal(state.groups[0].period, null);
+  assert.deepEqual(state.groups[0].documentIds, ["doc-a", "doc-b"]);
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b"]);
+});
+
+test("combined task group result is counted once", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "SUCCEEDED", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: null, groupSettlementAmount: 98794.47, groupErpSalesTotal: 98768.85, erpSalesTotal: 98768.85, taskId: "rec-a", issues: [] },
+      { id: "doc-b", status: "SUCCEEDED", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: null, groupSettlementAmount: 98794.47, groupErpSalesTotal: 98768.85, erpSalesTotal: 98768.85, taskId: "rec-a", issues: [] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "COMPLETED");
+  assert.equal(state.groups[0].status, "SUCCEEDED");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+});
+
+test("keeps combined task group review even when the group difference is within threshold", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      {
+        id: "doc-a",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: null,
+        groupSettlementAmount: 98794.47,
+        groupErpSalesTotal: 98768.85,
+        erpSalesTotal: 98768.85,
+        taskId: "rec-a",
+        issues: ["ERP聚合范围与结算单范围不一致，范围不可比。"],
+      },
+      {
+        id: "doc-b",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: null,
+        groupSettlementAmount: 98794.47,
+        groupErpSalesTotal: 98768.85,
+        erpSalesTotal: 98768.85,
+        taskId: "rec-a",
+        issues: ["ERP聚合范围与结算单范围不一致，范围不可比。"],
+      },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+  assert.deepEqual(state.documents.map((document) => document.status), ["NEEDS_REVIEW", "NEEDS_REVIEW"]);
+  assert.match(state.groups[0].issues.join(" "), /范围不可比/);
+});
+
+test("auto-resolves split documents when a matched sibling already succeeded", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      {
+        id: "doc-a",
+        status: "SUCCEEDED",
+        shopNo: "NBSC25",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 583306,
+        confirmedSettlementLabel: "销售金额",
+        erpSalesTotal: 583306,
+        erpRawSalesTotal: 583306,
+        erpRawNetSalesTotal: 495810.1,
+        taskId: "rec-a",
+        issues: [],
+      },
+      {
+        id: "doc-b",
+        status: "NEEDS_REVIEW",
+        shopNo: "NBSC25",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 0,
+        confirmedSettlementLabel: "销售金额",
+        erpSalesTotal: 495810.1,
+        erpRawSalesTotal: 583306,
+        erpRawNetSalesTotal: 495810.1,
+        taskId: "rec-b",
+        issues: ["0 销售费用单单张差额较大"],
+      },
+    ],
+    groups: [],
+    status: "NEEDS_REVIEW",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "COMPLETED");
+  assert.equal(state.groups[0].status, "SUCCEEDED");
+  assert.equal(state.groups[0].settlementAmount, 583306);
+  assert.equal(state.groups[0].differenceAmount, 0);
+  assert.deepEqual(state.documents.map((document) => document.status), ["SUCCEEDED", "SUCCEEDED"]);
+});
+
+test("auto-resolves split documents using sales candidates when selected bases are mixed", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      {
+        id: "doc-a",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 60685.26,
+        confirmedSettlementLabel: "含税结账金额",
+        salesSettlementAmount: 69517.25,
+        salesSettlementLabel: "本期实销金额",
+        erpSalesTotal: 88204.28,
+        erpRawSalesTotal: 98768.85,
+        erpRawNetSalesTotal: 88204.28,
+        taskId: "rec-a",
+        issues: ["单张差额较大"],
+      },
+      {
+        id: "doc-b",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 29277.22,
+        confirmedSettlementLabel: "本期实销金额",
+        salesSettlementAmount: 29277.22,
+        salesSettlementLabel: "本期实销金额",
+        erpSalesTotal: 98768.85,
+        erpRawSalesTotal: 98768.85,
+        erpRawNetSalesTotal: 88204.28,
+        taskId: "rec-b",
+        issues: ["单张差额较大"],
+      },
+    ],
+    groups: [],
+    status: "NEEDS_REVIEW",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "COMPLETED");
+  assert.equal(state.groups[0].status, "SUCCEEDED");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].erpSalesTotal, 98768.85);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+  assert.deepEqual(state.documents.map((document) => document.confirmedSettlementAmount), [69517.25, 29277.22]);
+  assert.deepEqual(state.documents.map((document) => document.confirmedSettlementLabel), ["本期实销金额", "本期实销金额"]);
+  assert.deepEqual(state.documents.map((document) => document.erpSalesTotal), [98768.85, 98768.85]);
+  assert.deepEqual(state.documents.map((document) => document.status), ["SUCCEEDED", "SUCCEEDED"]);
+});
+
+test("auto-resolves split documents by recovering sales candidates from issue text", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      {
+        id: "doc-a",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 60685.26,
+        confirmedSettlementLabel: "含税结账金额",
+        erpSalesTotal: 88204.28,
+        erpRawSalesTotal: 98768.85,
+        erpRawNetSalesTotal: 88204.28,
+        taskId: "rec-a",
+        issues: ["最接近的12%扣率ERP子集销售额为66549，与本期实销金额69517.25相差2968.25；Agent 理由：已扣除12%扣率8342.07元后形成含税结账金额60685.26元。"],
+      },
+      {
+        id: "doc-b",
+        status: "NEEDS_REVIEW",
+        shopNo: "WHAD28",
+        period: "2026-05",
+        version: 1,
+        confirmedSettlementAmount: 26485.05,
+        confirmedSettlementLabel: "含税结账金额",
+        erpSalesTotal: 88204.28,
+        erpRawSalesTotal: 98768.85,
+        erpRawNetSalesTotal: 88204.28,
+        taskId: "rec-b",
+        issues: ["最接近的8%扣率ERP子集销售额为30463.85，与本期实销金额29277.22相差1186.63；Agent 理由：结算单同时列示扣率2342.18及其他扣率449.99。"],
+      },
+    ],
+    groups: [],
+    status: "NEEDS_REVIEW",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "COMPLETED");
+  assert.equal(state.groups[0].status, "SUCCEEDED");
+  assert.equal(state.groups[0].settlementAmount, 98794.47);
+  assert.equal(state.groups[0].differenceAmount, -25.62);
+  assert.deepEqual(state.documents.map((document) => document.confirmedSettlementAmount), [69517.25, 29277.22]);
+  assert.deepEqual(state.documents.map((document) => document.confirmedSettlementLabel), ["本期实销金额", "本期实销金额"]);
+});
+
+test("batch export applies split document auto-resolution", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 69517.25, erpSalesTotal: 98768.85, taskId: "rec-a", groupId: null, fileName: "a.pdf", sourceFileName: null, issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 29277.22, erpSalesTotal: 98768.85, taskId: "rec-b", groupId: null, fileName: "b.pdf", sourceFileName: null, issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "FAILED",
+  };
+
+  const csv = buildBatchExportCsv(state);
+
+  assert.match(csv, /SUCCEEDED/);
+  assert.match(csv, /-25\.62/);
+  assert.doesNotMatch(csv, /29251\.6/);
+  assert.doesNotMatch(csv, /NEEDS_REVIEW/);
+  assert.doesNotMatch(csv, /单张差额较大/);
+});
+
+test("keeps split documents in review when the group total still differs from ERP", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 37141.89, erpSalesTotal: 49353, taskId: "rec-a", issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 87001.25, erpSalesTotal: 49353, taskId: "rec-b", issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].settlementAmount, 124143.14);
+  assert.equal(state.groups[0].differenceAmount, -74790.14);
+  assert.deepEqual(state.documents.map((document) => document.status), ["NEEDS_REVIEW", "NEEDS_REVIEW"]);
+});
+
+test("explains unresolved split groups as scope mismatches", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 37141.89, erpSalesTotal: 49353, taskId: "rec-a", issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 87001.25, erpSalesTotal: 49353, taskId: "rec-b", issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+  const note = unresolvedSplitGroupScopeReviewNote(state.groups[0]);
+
+  assert.match(note, /同批同店同账期拆单未能与 ERP 同范围对齐/);
+  assert.match(note, /2 份结算单合计 124143\.14 元/);
+  assert.match(note, /组级差额 -74790\.14 元/);
+  assert.match(note, /单张 full-shop 差额.*不作为可结算差额/);
+});
+
+test("batch export uses group differences for unresolved split documents", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 37141.89, erpSalesTotal: 49353, taskId: "rec-a", groupId: null, fileName: "a.pdf", sourceFileName: null, issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHMB03", period: "2026-05", version: 1, confirmedSettlementAmount: 87001.25, erpSalesTotal: 49353, taskId: "rec-b", groupId: null, fileName: "b.pdf", sourceFileName: null, issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  const csv = buildBatchExportCsv(state);
+
+  assert.match(csv, /-74790\.14/);
+  assert.doesNotMatch(csv, /12211\.11/);
+  assert.doesNotMatch(csv, /-37648\.25/);
+});
+
+test("does not auto-resolve split documents when ERP amounts are inconsistent", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 60, erpSalesTotal: 100, taskId: "rec-a", issues: ["单张差额较大"] },
+      { id: "doc-b", status: "NEEDS_REVIEW", shopNo: "WHAD28", period: "2026-05", version: 1, confirmedSettlementAmount: 40, erpSalesTotal: 90, taskId: "rec-b", issues: ["单张差额较大"] },
+    ],
+    groups: [],
+    status: "PROCESSING",
+  };
+
+  rebuildBatchGroups(state);
+
+  assert.equal(state.status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].status, "NEEDS_REVIEW");
+  assert.equal(state.groups[0].erpSalesTotal, null);
+  assert.deepEqual(state.documents.map((document) => document.status), ["NEEDS_REVIEW", "NEEDS_REVIEW"]);
+});
+
+test("settled batch documents show task review reasons instead of precheck hints", () => {
+  const issues = settledDocumentIssues(
+    ["执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额", "人工保留说明"],
+    "NEEDS_REVIEW",
+    [{ title: "总差额", message: "所选口径差额超过阈值", differenceAmount: 301, suggestion: null }],
+  );
+
+  assert.deepEqual(issues, ["总差额（差额 301.00）：所选口径差额超过阈值"]);
+  assert.deepEqual(settledDocumentIssues(["执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额"], "SUCCEEDED"), []);
+});
+
+test("manual settlement amount accepts zero and negative values", () => {
+  assert.equal(parseManualSettlementAmount("-584.12"), -584.12);
+  assert.equal(parseManualSettlementAmount(0), 0);
+  assert.equal(parseManualSettlementAmount("¥1,234.56"), 1234.56);
+  assert.equal(parseManualSettlementAmount(""), null);
+  assert.equal(parseManualSettlementAmount(null), null);
+  assert.equal(parseManualSettlementAmount(false), null);
+  assert.equal(parseManualSettlementAmount("abc"), null);
+});
+
+test("batch upload validation routes decoded and mojibake detail files to manual confirmation", () => {
+  const mojibake = Buffer.from("SZSC19-5月明细.pdf.xls", "utf8").toString("latin1");
+
+  assert.equal(validateBatchSettlementUpload("SZSC19-5月明细.pdf.xls")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload("SZSC19-费用清单(6).xls")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload("SZSC32-5月租赁.pdf")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload(mojibake)?.code, "MANUAL_CONFIRMATION_REQUIRED");
+});
+
+test("batch upload validation keeps multi-code settlement files for Agent identity review", () => {
+  assert.equal(validateBatchSettlementUpload("NJAD01(NJTM01)结算单-202605.pdf"), null);
+  assert.equal(validateBatchSettlementUpload("SHAD74&SHNK77结算单-202605.xlsx")?.code, "NOT_SETTLEMENT_FILE");
+});
+
+test("batch upload validation accepts macro-enabled Excel and browser image MIME types", () => {
+  assert.equal(validateBatchSettlementUpload("HZAD71结算单.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12"), null);
+  assert.equal(validateBatchSettlementUpload("HZAD71结算单.webp", "image/webp"), null);
+});
