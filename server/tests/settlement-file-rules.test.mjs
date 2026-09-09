@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { settlementFileRejectionReason } from "../dist/lib/settlement-file-rules.js";
+import {
+  settlementFileManualReviewReason,
+  settlementFileRejectionReason,
+} from "../dist/lib/settlement-file-rules.js";
 
 test("rejects files that should not enter settlement reconciliation", () => {
   assert.match(settlementFileRejectionReason("AD15库存商品盘点表-5月.xls") ?? "", /盘点表/);
   assert.match(settlementFileRejectionReason("WXSC11-扣款明细(1).pdf") ?? "", /扣款明细/);
-  assert.match(settlementFileRejectionReason("SZSC19-5月明细.pdf.xls") ?? "", /明细文件/);
-  assert.match(settlementFileRejectionReason("SZSC32-5月租赁.pdf") ?? "", /租赁/);
   assert.match(settlementFileRejectionReason("SHAD74&SHNK77结算单-202605.xlsx") ?? "", /多个店铺号/);
+});
+
+test("keeps ambiguous attachment names for manual confirmation", () => {
+  for (const fileName of [
+    "SZSC19-5月明细.pdf.xls",
+    "SZSC19-费用清单(6).xls",
+    "SZSC32-5月租赁.pdf",
+  ]) {
+    assert.equal(settlementFileRejectionReason(fileName), null);
+    assert.match(settlementFileManualReviewReason(fileName) ?? "", /人工确认/);
+  }
 });
 
 test("rejects mojibake multipart filenames after decoding", () => {

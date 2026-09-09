@@ -6,7 +6,12 @@ import {
   extractPeriodFromFileName,
   extractPeriodFromRows,
   extractSettlementCandidates,
+  isExcelFileName,
 } from "../dist/lib/excel-settlement.js";
+
+test("recognizes macro-enabled Excel workbooks", () => {
+  assert.equal(isExcelFileName("HZAD71结算单.xlsm"), true);
+});
 
 test("extracts labeled settlement amount candidates from Excel rows", () => {
   const rows = [

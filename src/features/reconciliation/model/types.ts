@@ -52,6 +52,7 @@ export type ReconciliationTaskSummary = {
   name: string | null;
   status: ReconciliationStatus;
   periodLabel: string | null;
+  comparisonNote?: string | null;
   settlementFile: UploadedFile;
   erpFile: UploadedFile;
   metrics: ReconciliationMetrics;

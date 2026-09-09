@@ -114,6 +114,19 @@ test("precheck groups same shop-period files into one execution unit", () => {
   assert.equal(units[0].fileName, "WHAD28 2026-05 合并结算单（2份）");
 });
 
+test("precheck does not execute documents pending manual confirmation", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "NEEDS_REVIEW", shopNo: "SZSC19", period: "2026-05", version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: ["文件名含“明细”，需人工确认其是否为结算依据；确认店铺号、账期或金额后再执行"], fileName: "SZSC19-5月明细.pdf.xls" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  assert.deepEqual(buildBatchExecutionGroups(state), []);
+});
+
 test("precheck groups split-number files even when period is unknown", () => {
   const state = {
     id: "batch-1",
@@ -137,6 +150,28 @@ test("precheck groups split-number files even when period is unknown", () => {
   assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b", "doc-c"]);
   assert.equal(units[0].period, null);
   assert.equal(units[0].fileName, "NBNK01 账期待识别 合并结算单（3份）");
+});
+
+test("precheck groups same-shop files with unrecognized periods despite inconsistent filenames", () => {
+  const state = {
+    id: "batch-1",
+    documents: [
+      { id: "doc-a", status: "READY", shopNo: "HZAD71", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "HZAD71 (杭州之江银泰百货)0结算单，备注发票号(2).pdf" },
+      { id: "doc-b", status: "READY", shopNo: "HZAD71", period: null, version: 1, confirmedSettlementAmount: null, erpSalesTotal: null, taskId: null, issues: [], fileName: "HZAD71 (杭州之江银泰百货)结算单05.pdf" },
+    ],
+    groups: [],
+    status: "READY",
+  };
+
+  rebuildBatchGroups(state);
+  const units = buildBatchExecutionGroups(state);
+
+  assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].shopNo, "HZAD71");
+  assert.equal(state.groups[0].period, null);
+  assert.deepEqual(state.groups[0].documentIds, ["doc-a", "doc-b"]);
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].documentIds, ["doc-a", "doc-b"]);
 });
 
 test("combined task group result is counted once", () => {
@@ -468,14 +503,21 @@ test("manual settlement amount accepts zero and negative values", () => {
   assert.equal(parseManualSettlementAmount("abc"), null);
 });
 
-test("batch upload validation rejects decoded and mojibake detail files", () => {
+test("batch upload validation routes decoded and mojibake detail files to manual confirmation", () => {
   const mojibake = Buffer.from("SZSC19-5月明细.pdf.xls", "utf8").toString("latin1");
 
-  assert.equal(validateBatchSettlementUpload("SZSC19-5月明细.pdf.xls")?.code, "NOT_SETTLEMENT_FILE");
-  assert.equal(validateBatchSettlementUpload(mojibake)?.code, "NOT_SETTLEMENT_FILE");
+  assert.equal(validateBatchSettlementUpload("SZSC19-5月明细.pdf.xls")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload("SZSC19-费用清单(6).xls")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload("SZSC32-5月租赁.pdf")?.code, "MANUAL_CONFIRMATION_REQUIRED");
+  assert.equal(validateBatchSettlementUpload(mojibake)?.code, "MANUAL_CONFIRMATION_REQUIRED");
 });
 
 test("batch upload validation keeps multi-code settlement files for Agent identity review", () => {
   assert.equal(validateBatchSettlementUpload("NJAD01(NJTM01)结算单-202605.pdf"), null);
   assert.equal(validateBatchSettlementUpload("SHAD74&SHNK77结算单-202605.xlsx")?.code, "NOT_SETTLEMENT_FILE");
+});
+
+test("batch upload validation accepts macro-enabled Excel and browser image MIME types", () => {
+  assert.equal(validateBatchSettlementUpload("HZAD71结算单.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12"), null);
+  assert.equal(validateBatchSettlementUpload("HZAD71结算单.webp", "image/webp"), null);
 });

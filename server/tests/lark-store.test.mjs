@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { asAttachment, findCreatedRecordId, findSupersededTaskRecords, formulaChecksReady, isLarkRecordId, resolveTaskCompletionStatus, rowsFromPage, uniqueActionableIssues } from "../dist/lib/lark-store.js";
+import { toDetail, toReviewListRow } from "../dist/routes/tasks.js";
 
 test("reads the record ID returned by lark-cli record-upsert", () => {
   assert.equal(findCreatedRecordId({ data: { record: { record_id_list: ["recvsUgd2jAPoR"] } } }), "recvsUgd2jAPoR");
@@ -50,6 +51,61 @@ test("deduplicates review issues and ignores empty messages", () => {
 
   assert.equal(issues.length, 1);
   assert.equal(issues[0].message, "超过阈值");
+});
+
+test("shows linked task amounts on review rows", () => {
+  const task = {
+    id: "rec-task",
+    taskId: "TASK-202609080720",
+    name: "NJSC19 2026-05",
+    shopNo: "NJSC19",
+    period: "2026-05",
+    status: "NEEDS_REVIEW",
+    batchId: null,
+    ruleVersions: null,
+    settlementAmount: 196062,
+    erpAmount: 196062,
+    differenceAmount: 0,
+    agentDifference: 0,
+    differenceCheck: "通过",
+    reasonablenessCheck: "通过",
+    failureReason: null,
+    cancelReason: null,
+    rawAgentJson: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: "2026-09-08T07:00:00.000Z",
+    createdBy: { id: "u", name: "u" },
+    settlementFile: null,
+    erpFile: null,
+    reviewIds: ["rec-review"],
+  };
+  const review = {
+    id: "rec-review",
+    title: "金额待核对",
+    taskRecordId: "rec-task",
+    taskId: task.taskId,
+    shopNo: task.shopNo,
+    differenceAmount: 0,
+    message: "金额已对平，但范围待确认。",
+    suggestion: "请确认范围。",
+    status: "PENDING",
+    note: null,
+    resolvedAt: null,
+    createdAt: null,
+  };
+
+  const row = toReviewListRow(review, task);
+  assert.equal(row.item.settlementValue, "196062");
+  assert.equal(row.item.erpValue, "196062");
+  assert.equal(row.item.differenceAmount, "0");
+  assert.equal(row.task.name, "NJSC19");
+  assert.equal(row.task.periodLabel, "2026-05");
+
+  const detail = toDetail(task, [review]);
+  assert.equal(detail.reviewItems[0].settlementValue, "196062");
+  assert.equal(detail.reviewItems[0].erpValue, "196062");
+  assert.equal(detail.reviewItems[0].differenceAmount, "0");
 });
 
 test("finds only older pending tasks for the same settlement file", () => {

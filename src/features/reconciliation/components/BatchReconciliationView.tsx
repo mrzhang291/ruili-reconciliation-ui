@@ -48,8 +48,7 @@ function moneyText(value: number | null) {
 }
 
 function isRunnableBatchItem(item: BatchPrecheckItem) {
-  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(item.status)
-    && !item.taskId;
+  return item.status === "READY" && !item.taskId;
 }
 
 function documentDraft(item: BatchPrecheckItem, drafts: Record<string, ManualDraft>) {
@@ -104,19 +103,27 @@ export function BatchReconciliationView() {
   const canStart = activePrecheckResult ? canExecute : canPrecheck;
   const filePreview = batchFiles.slice(0, 10);
   const pendingPrecheckCount = activePrecheckResult?.items.filter((item) => item.status === "NEEDS_REVIEW" && !item.taskId && !isRunnableBatchItem(item)).length ?? 0;
+  const hasProcessingBatchItem = activePrecheckResult?.items.some((item) => item.status === "PROCESSING") ?? false;
   const totalSize = batchFiles.reduce((sum, file) => sum + file.size, 0);
 
   useEffect(() => {
-    if (!running || !activePrecheckResult?.batchId) return undefined;
+    if (!activePrecheckResult?.batchId || (!running && !hasProcessingBatchItem)) return undefined;
     const batchId = activePrecheckResult.batchId;
-    const timer = window.setInterval(() => {
+    let cancelled = false;
+    const refreshBatch = () => {
       void reconciliationApi.getBatch(batchId).then((result) => {
+        if (cancelled) return;
         setPrecheckResult(result);
         setPrecheckSignature(inputSignature);
       }).catch(() => undefined);
-    }, 2_500);
-    return () => window.clearInterval(timer);
-  }, [activePrecheckResult?.batchId, inputSignature, running]);
+    };
+    refreshBatch();
+    const timer = window.setInterval(refreshBatch, 2_500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activePrecheckResult?.batchId, hasProcessingBatchItem, inputSignature, running]);
 
   const runPrecheck = async () => {
     if (!filesReady || prechecking) return null;
@@ -292,7 +299,7 @@ export function BatchReconciliationView() {
           </div>
           <div className="file-icon" aria-hidden="true">{filesReady ? batchFiles.length : "FILES"}</div>
           <h3 id="batch-upload-title">批量结算单文件</h3>
-          <p>可一次多选 PDF、Excel 或图片；盘点、统计、扣款和租赁文件会过滤。</p>
+          <p>可一次多选 PDF、Excel 或图片；盘点、统计和扣款文件会过滤，明细、费用清单和租赁资料需人工确认。</p>
           <div className="file-actions">
             <label className="outline-button batch-picker">
               <span aria-hidden="true">＋</span> {filesReady ? "更换文件" : "选择多个文件"}

@@ -13,7 +13,7 @@ import { runLarkCli } from "./lark-cli.js";
 import { rowsFromPage } from "./lark-store.js";
 
 export const erpFields = ["店铺号", "扣点", "销售额", "月份"] as const;
-const excelExtensions = new Set([".xlsx", ".xls"]);
+const excelExtensions = new Set([".xlsx", ".xls", ".xlsm"]);
 
 type PageEnvelope = {
   ok?: boolean;
@@ -120,7 +120,7 @@ export async function importErpWorkbook(params: {
 export async function parseErpWorkbook(filePath: string, fileName: string) {
   const extension = path.extname(fileName).toLowerCase();
   if (!excelExtensions.has(extension)) {
-    throw new ErpImportError("ERP 总表只支持 .xlsx / .xls", "ERP_IMPORT_INVALID_FILE_TYPE");
+    throw new ErpImportError("ERP 总表只支持 .xlsx / .xls / .xlsm", "ERP_IMPORT_INVALID_FILE_TYPE");
   }
   const rows = await readExcelRows(filePath, { maxRows: 10_000, maxCols: 80 }).catch((error: unknown) => {
     throw new ErpImportError(error instanceof Error ? error.message : "ERP Excel 读取失败", "ERP_IMPORT_READ_FAILED");

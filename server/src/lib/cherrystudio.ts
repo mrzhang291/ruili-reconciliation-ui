@@ -783,19 +783,15 @@ function extractResult(input: unknown): CherryParseResult | null {
     const issueSummary = checked.suppressedAgentIssue ? "" : input.issues.trim();
     const issues: CherryIssue[] = [];
     if (issueSummary || checked.reviewMessages.length) {
-      const backendMessage = checked.reviewMessages.length
-        ? formatBackendReviewMessage(checked, basisReason)
-        : "";
+      const review = formatReviewMessage(checked, input.issues, basisReason);
       issues.push({
-        rowLabel: checked.reviewMessages.length ? "总差额" : "Agent 对账提示",
+        rowLabel: review.rowLabel,
         fieldName: checked.reviewMessages.length ? checked.label : settlementAmountLabel,
         settlementAmount,
         erpAmount: checked.erpAmount,
-        differenceAmount: checked.scopedErpMismatch ? null : checked.difference,
-        message: [issueSummary, backendMessage].filter(Boolean).join(" "),
-        suggestion: checked.scopedErpMismatch
-          ? "补充 ERP 的合同、专柜、铺位或活动范围键，或把同范围结算单合并后再复核。"
-          : checked.reviewMessages.length ? "复核结算单金额口径，必要时检查 ERP/DRP MCP 查询结果与结算单字段。" : null,
+        differenceAmount: checked.difference,
+        message: review.message,
+        suggestion: review.suggestion,
       });
     }
 
@@ -909,6 +905,11 @@ function validateAgentArithmetic(payload: AgentReconciliationPayload) {
   const thresholdCents = toCents(reconciliationReviewThresholdAmount);
   const reviewMessages: string[] = [];
   const scopedErpMismatch = indicatesScopedErpMismatch(payload.issues);
+  const rates = rateEvidence(payload.issues, payload.basisReason);
+  const rateStatus = rateComparison(rates.settlement, rates.erp);
+  if (rateStatus !== "扣点档一致") {
+    reviewMessages.push(rateStatus ? "结算单与 ERP 扣点档不一致。" : "结算单或 ERP 未提供完整扣点分档。");
+  }
   if (basisCorrection) {
     const preferredDescription = basisCorrection.basis === "sales_total" ? "扣点前销售口径" : "扣点后金额口径";
     reviewMessages.push(`结算单字段「${payload.settlementAmountLabel}」更像${preferredDescription}，后端改按「${basisCorrection.label}」记录。`);
@@ -946,7 +947,7 @@ function validateAgentArithmetic(payload: AgentReconciliationPayload) {
 
 function indicatesScopedErpMismatch(value: string) {
   const text = value.normalize("NFKC").replace(/\s+/g, "");
-  return /聚合范围与结算单范围不一致|不能将ERP店铺聚合金额直接视为普通差额|ERP全店汇总|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致|(?:预览页面|请勿用来结算)|(?:账期|期间|月份).*?(?:不一致|冲突)|(?:文件名主体|正文主体|结算主体|主体名称).*?(?:不一致|冲突)|(?:字段)?口径.*?(?:不一致|冲突)|无法唯一确定对账口径|金额接近度与字段口径存在冲突|结算单扣率.*?ERP.*?扣率|ERP.*?扣率.*?结算单扣率|ERP.*(?:聚合|汇总|店铺号|店铺|同店|同一店铺|多条|多档|不同扣率).*?(?:范围|不可比|无法确认|无法对应|不能直接|明细范围|合同|专柜|铺位|活动|特卖|本结算单|单一|部分|仅覆盖|未覆盖|口径)|(?:单一合同|单一专柜|单一结算部门|单一客户合同|仅覆盖|仅列示|仅显示).*?ERP/.test(text);
+  return /聚合范围与结算单范围不一致|销售范围待确认|结算期间待确认|不能将ERP店铺聚合金额直接视为普通差额|ERP全店汇总|结算单与ERP(?:销售)?(?:范围|数据口径).*明显不一致|(?:预览页面|请勿用来结算)|(?:账期|期间|月份).*?(?:不一致|冲突)|(?:文件名主体|正文主体|结算主体|主体名称).*?(?:不一致|冲突)|(?:字段)?口径.*?(?:不一致|冲突)|无法唯一确定对账口径|金额接近度与字段口径存在冲突|结算单扣率.*?ERP.*?扣率|ERP.*?扣率.*?结算单扣率|ERP.*(?:聚合|汇总|店铺号|店铺|同店|同一店铺|多条|多档|不同扣率).*?(?:范围|不可比|无法确认|无法对应|不能直接|明细范围|合同|专柜|铺位|活动|特卖|本结算单|单一|部分|仅覆盖|未覆盖|口径)|(?:单一合同|单一专柜|单一结算部门|单一客户合同|仅覆盖|仅列示|仅显示).*?ERP/.test(text);
 }
 
 function preferredBasisFromSettlementLabel(payload: Pick<AgentReconciliationPayload, "settlementAmount" | "settlementAmountLabel" | "salesTotal" | "basisReason" | "issues">): Exclude<AgentErpBasis, "ambiguous"> | null {
@@ -989,15 +990,103 @@ function isNonActionableSalesTieOutIssue(payload: AgentReconciliationPayload, se
   return explainsOnlyDeductions && !blocksSettlement;
 }
 
-function formatBackendReviewMessage(
+function normalizedRates(value: string) {
+  const rates = new Set<string>();
+  for (const match of value.matchAll(/\d+(?:\.\d+)?%|(?<!\d)0\.\d{1,3}\b/g)) {
+    const raw = match[0];
+    const percentage = raw.endsWith("%") ? Number(raw.slice(0, -1)) : Number(raw) * 100;
+    if (percentage >= 0 && percentage <= 100) rates.add(`${Number(percentage.toFixed(3))}%`);
+  }
+  return [...rates];
+}
+
+function ratesForSide(text: string, side: "settlement" | "erp") {
+  const marker = side === "settlement" ? /结算单|原件/g : /ERP(?:\/DRP)?/gi;
+  const opposite = side === "settlement" ? /ERP(?:\/DRP)?/gi : /结算单|原件/g;
+  const rates = new Set<string>();
+  for (const sentence of text.split(/[。！？\n]/)) {
+    for (const match of sentence.matchAll(marker)) {
+      const start = match.index ?? 0;
+      const tail = sentence.slice(start);
+      if (/^(?:结算单|原件|ERP(?:\/DRP)?)\s*(?:缺少|多出|未提取|未提供|无)/i.test(tail)) continue;
+      const next = tail.search(opposite);
+      for (const rate of normalizedRates(next > 0 ? tail.slice(0, next) : tail)) rates.add(rate);
+    }
+    if (/结算单[^。！？]*(?:分别)?对应ERP(?:\/DRP)?(?:返回)?/i.test(sentence)) {
+      const shared = normalizedRates(sentence);
+      for (const rate of shared) rates.add(rate);
+    }
+  }
+  return [...rates];
+}
+
+function rateEvidence(agentIssues: string, basisReason: string) {
+  const evidence = `${agentIssues}\n${basisReason}`.normalize("NFKC").replace(/\s+/g, " ");
+  return { settlement: ratesForSide(evidence, "settlement"), erp: ratesForSide(evidence, "erp") };
+}
+
+function rateComparison(settlement: string[], erp: string[]) {
+  if (!settlement.length || !erp.length) return null;
+  const extra = erp.filter((rate) => !settlement.includes(rate));
+  const missing = settlement.filter((rate) => !erp.includes(rate));
+  if (!extra.length && !missing.length) return "扣点档一致";
+  const parts = [extra.length ? `ERP多出${extra.join("、")}档` : "", missing.length ? `ERP缺少${missing.join("、")}档` : ""].filter(Boolean);
+  return parts.join("，");
+}
+
+function reviewCause(
   checked: ReturnType<typeof validateAgentArithmetic> & NonNullable<ReturnType<typeof validateAgentArithmetic>>,
+  text: string,
+  comparison: string | null,
+) {
+  const settlementAmount = checked.erpAmount - checked.difference;
+  const amountDifference = `金额差：ERP ${checked.erpAmount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} − 结算单 ${settlementAmount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} = ${checked.difference.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`;
+  if (comparison === "扣点档一致") {
+    if (/(?:账期|期间|月份).*?(?:不一致|冲突)|(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日).*?(?:至|到).*(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日)/.test(text)) return `扣点档一致；${amountDifference}，结算期间与 ERP 取数期间可能不一致`;
+    if (checked.scopedErpMismatch) return `扣点档一致；${amountDifference}，差异可能来自柜组、合同或活动范围`;
+    return `扣点档一致；${amountDifference}`;
+  }
+  if (/(?:预览页面|请勿用来结算)/.test(text)) return "当前为预览单，需以正式单确认";
+  if (/(?:账期|期间|月份).*?(?:不一致|冲突)|(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日).*?(?:至|到).*(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日)/.test(text)) return "结算期间与 ERP 取数期间可能不一致";
+  if (comparison && comparison !== "扣点档一致") return `${comparison}，可能包含其他合同、柜组或活动`;
+  if (checked.scopedErpMismatch) return comparison === "扣点档一致" ? "扣点档一致，差异可能来自柜组、合同或活动范围" : "结算单或 ERP 未提供完整扣点分档，需核对柜组、合同或活动范围";
+  if (/字段|口径|扣点后金额|net_sales_total/.test(text) || checked.reviewMessages.some((message) => /字段|口径|选择/.test(message))) return "需确认结算金额是否已扣点";
+  return "扣点分档未完整提供，需先确认扣点与金额口径";
+}
+
+function explicitReviewMessage(
+  agentIssues: string,
+  checked: ReturnType<typeof validateAgentArithmetic> & NonNullable<ReturnType<typeof validateAgentArithmetic>>,
+) {
+  const text = agentIssues.trim().replace(/\s+/g, " ");
+  if (!text.startsWith("结算单扣点：") || !text.includes("ERP扣点：")) return null;
+  const sentences = text.match(/[^。]+。/g) ?? [];
+  const first = sentences[0] ?? "";
+  const settlementAmount = checked.erpAmount - checked.difference;
+  const amountDifference = `扣点档一致；金额差：ERP ${checked.erpAmount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} − 结算单 ${settlementAmount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} = ${checked.difference.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元。`;
+  const message = /扣点档一致/.test(text) ? `${first}${amountDifference}` : sentences.slice(0, 2).join("");
+  return message.length <= 260 ? message : null;
+}
+
+function formatReviewMessage(
+  checked: ReturnType<typeof validateAgentArithmetic> & NonNullable<ReturnType<typeof validateAgentArithmetic>>,
+  agentIssues: string,
   basisReason: string,
 ) {
-  const agentReason = `Agent 理由：${basisReason}`;
-  if (checked.scopedErpMismatch) {
-    return `${checked.reviewMessages.join(" ")} ${agentReason}`;
-  }
-  return `${checked.reviewMessages.join(" ")} 扣点前差额 ${checked.salesDifference.toFixed(2)} 元，扣点后差额 ${checked.netSalesDifference.toFixed(2)} 元。${agentReason}`;
+  const text = `${agentIssues}\n${basisReason}`.normalize("NFKC").replace(/\s+/g, "");
+  const explicit = explicitReviewMessage(agentIssues, checked);
+  const rates = rateEvidence(agentIssues, basisReason);
+  const comparison = rateComparison(rates.settlement, rates.erp);
+  const rateNeedsReview = comparison !== "扣点档一致";
+  const message = explicit ?? `结算单扣点：${rates.settlement.join("、") || "未提取"}；ERP扣点：${rates.erp.join("、") || "未提供分档"}。${reviewCause(checked, text, comparison)}。`;
+  const suggestion = rateNeedsReview
+    ? "请核对扣点差异档对应的合同、柜组或活动。"
+    : /(?:账期|期间|月份).*?(?:不一致|冲突)|(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日).*?(?:至|到).*(?:\d{2}\/\d{2}|\d{2}-\d{2}|\d{4}年\d{2}月\d{2}日)/.test(text)
+      ? "请确认结算期间与 ERP 取数期间一致。"
+      : checked.scopedErpMismatch
+        ? "请核对对应的合同、柜组或活动范围。"
+        : "请确认结算金额是否已扣点。";
+  return { rowLabel: rateNeedsReview ? "扣点待核对" : "金额待核对", message, suggestion };
 }
 
 function extractReason(value: unknown) {

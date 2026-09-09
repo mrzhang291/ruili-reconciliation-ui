@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveUploadDir } from "./config.js";
 
-const allowedExtensions = [".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"];
+const allowedExtensions = [".xlsx", ".xls", ".xlsm", ".pdf", ".png", ".jpg", ".jpeg", ".webp"];
 
 export type StoredFile = {
   id: string;

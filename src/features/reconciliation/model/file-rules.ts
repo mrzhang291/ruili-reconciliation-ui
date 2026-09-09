@@ -2,6 +2,7 @@
 export const reconciliationAcceptedExtensions = [
   ".xlsx",
   ".xls",
+  ".xlsm",
   ".pdf",
   ".png",
   ".jpg",
@@ -11,6 +12,7 @@ export const reconciliationAcceptedExtensions = [
 export const reconciliationAcceptedMimeTypes = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
   "application/pdf",
   "image/png",
   "image/jpeg",
@@ -19,6 +21,7 @@ export const reconciliationAcceptedMimeTypes = [
 export const reconciliationFileAccept = [
   ...reconciliationAcceptedExtensions,
   ...reconciliationAcceptedMimeTypes,
+  "image/*",
 ].join(",");
 
 export const reconciliationMaxFileSizeMb = 20;
@@ -26,10 +29,10 @@ export const reconciliationMaxFileSizeBytes = reconciliationMaxFileSizeMb * 1024
 export const batchReconciliationMaxFiles = 30;
 export const batchReconciliationMaxTotalSizeMb = 200;
 export const batchReconciliationMaxTotalSizeBytes = batchReconciliationMaxTotalSizeMb * 1024 * 1024;
-export const reconciliationFileHint = "支持 Excel、PDF、PNG/JPG，单个文件不超过 20 MB";
-export const reconciliationReadableFileTypes = ".xlsx / .xls / .pdf / .png / .jpg / .jpeg";
-export const erpFileAccept = ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel";
-export const erpFileHint = "支持 .xlsx / .xls，单个文件不超过 20 MB";
+export const reconciliationFileHint = "支持 Excel、PDF 和图片，单个文件不超过 20 MB";
+export const reconciliationReadableFileTypes = ".xlsx / .xls / .xlsm / .pdf / 图片";
+export const erpFileAccept = ".xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroenabled.12";
+export const erpFileHint = "支持 .xlsx / .xls / .xlsm，单个文件不超过 20 MB";
 
 type UploadFileLike = Pick<File, "name" | "size" | "type">;
 
@@ -38,6 +41,7 @@ const acceptedMimeTypeSet = new Set<string>(reconciliationAcceptedMimeTypes);
 const extensionLabels: Record<string, string> = {
   ".xlsx": "Excel 工作簿",
   ".xls": "Excel 工作簿",
+  ".xlsm": "Excel 宏工作簿",
   ".pdf": "PDF 文档",
   ".png": "PNG 图片",
   ".jpg": "JPEG 图片",
@@ -46,6 +50,7 @@ const extensionLabels: Record<string, string> = {
 const mimeTypeLabels: Record<string, string> = {
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel 工作簿",
   "application/vnd.ms-excel": "Excel 工作簿",
+  "application/vnd.ms-excel.sheet.macroenabled.12": "Excel 宏工作簿",
   "application/pdf": "PDF 文档",
   "image/png": "PNG 图片",
   "image/jpeg": "JPEG 图片",
@@ -53,6 +58,7 @@ const mimeTypeLabels: Record<string, string> = {
 const fileBadges: Record<string, string> = {
   ".xlsx": "XLS",
   ".xls": "XLS",
+  ".xlsm": "XLS",
   ".pdf": "PDF",
   ".png": "IMG",
   ".jpg": "IMG",
@@ -64,9 +70,6 @@ const rejectedNamePatterns: Array<[RegExp, string]> = [
   [/供应商对账统计|对账统计表/, "供应商统计表不是结算单"],
   [/业绩确认/, "业绩确认表不是结算单"],
   [/扣款明细/, "扣款明细请作为人工附件处理，不作为结算单上传"],
-  [/明细/, "明细文件请作为人工附件处理，不作为结算单上传"],
-  [/费用清单/, "费用清单请作为人工附件处理，不作为结算单上传"],
-  [/租赁/, "租赁资料请作为人工附件处理，不作为结算单上传"],
 ];
 const shopCodePattern = /(^|[^A-Z0-9])([A-Z]{2,5}[A-Z0-9]*\d[A-Z0-9]*)(?=$|[^A-Z0-9])/g;
 const explicitMultiShopDelimiterPattern = /[&＆、,，+＋]/;
@@ -80,7 +83,9 @@ export function getReconciliationFileExtension(fileName: string) {
 export function getReconciliationFileTypeLabel(file: Pick<UploadFileLike, "name" | "type">) {
   const extension = getReconciliationFileExtension(file.name);
   if (extension && extensionLabels[extension]) return extensionLabels[extension];
-  if (file.type && mimeTypeLabels[file.type]) return mimeTypeLabels[file.type];
+  const mimeType = file.type.toLowerCase();
+  if (mimeType && mimeTypeLabels[mimeType]) return mimeTypeLabels[mimeType];
+  if (mimeType.startsWith("image/")) return "图片";
   return "对账资料";
 }
 
@@ -108,7 +113,6 @@ export function extractShopCodesFromFileName(fileName: string) {
 }
 
 export function settlementFileRejectionReason(fileName: string) {
-  const baseName = fileName.normalize("NFKC").split(/[\\/]/).pop() ?? fileName;
   const hardRejectedReason = settlementFileHardRejectionReason(fileName);
   if (hardRejectedReason) return hardRejectedReason;
 
@@ -131,7 +135,8 @@ export function settlementFileHardRejectionReason(fileName: string) {
 export function validateReconciliationFile(file: UploadFileLike) {
   const extension = getReconciliationFileExtension(file.name);
   const hasAcceptedExtension = extension ? acceptedExtensionSet.has(extension) : false;
-  const hasAcceptedMimeType = file.type ? acceptedMimeTypeSet.has(file.type) : false;
+  const mimeType = file.type.toLowerCase();
+  const hasAcceptedMimeType = Boolean(mimeType) && (acceptedMimeTypeSet.has(mimeType) || mimeType.startsWith("image/"));
 
   if (!hasAcceptedExtension && !hasAcceptedMimeType) {
     return `仅支持 ${reconciliationReadableFileTypes} 文件`;
@@ -150,7 +155,8 @@ export function validateReconciliationFile(file: UploadFileLike) {
 export function validateBatchReconciliationFile(file: UploadFileLike) {
   const extension = getReconciliationFileExtension(file.name);
   const hasAcceptedExtension = extension ? acceptedExtensionSet.has(extension) : false;
-  const hasAcceptedMimeType = file.type ? acceptedMimeTypeSet.has(file.type) : false;
+  const mimeType = file.type.toLowerCase();
+  const hasAcceptedMimeType = Boolean(mimeType) && (acceptedMimeTypeSet.has(mimeType) || mimeType.startsWith("image/"));
 
   if (!hasAcceptedExtension && !hasAcceptedMimeType) {
     return `仅支持 ${reconciliationReadableFileTypes} 文件`;
@@ -165,11 +171,12 @@ export function validateBatchReconciliationFile(file: UploadFileLike) {
 
 export function validateErpFile(file: UploadFileLike) {
   const extension = getReconciliationFileExtension(file.name);
-  const hasExcelExtension = extension === ".xlsx" || extension === ".xls";
-  const hasExcelMimeType = file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    || file.type === "application/vnd.ms-excel";
+  const hasExcelExtension = extension === ".xlsx" || extension === ".xls" || extension === ".xlsm";
+  const hasExcelMimeType = file.type.toLowerCase() === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    || file.type.toLowerCase() === "application/vnd.ms-excel"
+    || file.type.toLowerCase() === "application/vnd.ms-excel.sheet.macroenabled.12";
 
-  if (!hasExcelExtension && !hasExcelMimeType) return "ERP 总表只支持 .xlsx / .xls";
+  if (!hasExcelExtension && !hasExcelMimeType) return "ERP 总表只支持 .xlsx / .xls / .xlsm";
   if (file.size > reconciliationMaxFileSizeBytes) return `单个文件不能超过 ${reconciliationMaxFileSizeMb} MB`;
   return null;
 }

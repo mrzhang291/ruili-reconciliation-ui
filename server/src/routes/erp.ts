@@ -22,10 +22,11 @@ import { normalizeFileName } from "../lib/file-storage.js";
 
 export const erpRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
-const excelExtensions = new Set([".xlsx", ".xls"]);
+const excelExtensions = new Set([".xlsx", ".xls", ".xlsm"]);
 const excelMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
 ]);
 const sortFields = new Set(["month", "shopNo", "deductionRate", "salesAmount"]);
 
@@ -135,9 +136,10 @@ erpRouter.post("/import", upload.single("erpFile"), async (req, res, next) => {
 
     const fileName = normalizeFileName(file.originalname);
     const extension = path.extname(fileName).toLowerCase();
+    const mimeType = file.mimetype.toLowerCase();
     if (!excelExtensions.has(extension)
-      || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !excelMimeTypes.has(file.mimetype))) {
-      return res.status(400).json({ error: { code: "ERP_IMPORT_INVALID_FILE_TYPE", message: "ERP 总表只支持 .xlsx / .xls", requestId: crypto.randomUUID() } });
+      || Boolean(mimeType && mimeType !== "application/octet-stream" && !excelMimeTypes.has(mimeType))) {
+      return res.status(400).json({ error: { code: "ERP_IMPORT_INVALID_FILE_TYPE", message: "ERP 总表只支持 .xlsx / .xls / .xlsm", requestId: crypto.randomUUID() } });
     }
 
     const mode = parseMode(req.body?.mode);

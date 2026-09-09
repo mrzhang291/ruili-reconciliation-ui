@@ -281,15 +281,22 @@ async function recordUpsert(tableId: string, values: Record<string, unknown>, re
 }
 
 export async function createTaskRecord(params: { name: string; batchId: string }) {
-  const now = formatDateTime(new Date());
   const recordId = await recordUpsert(config.lark.taskTableId, {
     任务名称: params.name,
-    状态: "处理中",
+    状态: "待处理",
     处理批次ID: params.batchId,
-    开始时间: now,
   });
   invalidateTaskReadCaches();
   return recordId;
+}
+
+export async function startTaskRecord(recordId: string, batchId: string) {
+  const current = await getTaskRecord(recordId);
+  if (!current || current.batchId !== batchId) return false;
+  if (current.status === "PROCESSING") return true;
+  if (current.status !== "QUEUED") return false;
+  await updateTaskRecord(recordId, { 状态: "处理中", 开始时间: formatDateTime(new Date()) });
+  return true;
 }
 
 export async function updateTaskRecord(recordId: string, values: Record<string, unknown>) {
@@ -313,6 +320,15 @@ export async function uploadTaskAttachment(recordId: string, field: "结算文�
 export async function getTaskRecord(recordId: string) {
   const row = await recordGet(config.lark.taskTableId, recordId, taskFields);
   return row ? taskFromRow(row) : null;
+}
+
+export async function getTaskRecords(recordIds: string[]) {
+  const ids = [...new Set(recordIds.filter(isLarkRecordId))];
+  if (!ids.length) return [];
+  const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", config.lark.taskTableId, "--format", "json", "--as", "user"];
+  for (const id of ids) args.push("--record-id", id);
+  for (const field of taskFields) args.push("--field-id", field);
+  return rowsFromPage(await runLarkCli<PageEnvelope>(args)).map(taskFromRow);
 }
 
 export async function getReviewRecords(recordIds: string[]) {

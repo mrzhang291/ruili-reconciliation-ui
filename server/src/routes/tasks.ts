@@ -10,6 +10,7 @@ import {
   deleteTaskRecord,
   fileSummary,
   getTaskDetail,
+  getTaskRecords,
   listReviewRecords,
   listTaskRecords,
   type StoredReviewItem,
@@ -25,10 +26,11 @@ import {
 export const tasksRouter = Router();
 const taskStatuses = ["QUEUED", "PROCESSING", "SUCCEEDED", "NEEDS_REVIEW", "REVIEWED", "FAILED", "CANCELLED", "OBSOLETE"];
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
-const settlementExtensions = new Set([".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"]);
+const settlementExtensions = new Set([".xlsx", ".xls", ".xlsm", ".pdf", ".png", ".jpg", ".jpeg"]);
 const settlementMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
   "application/pdf",
   "image/png",
   "image/jpeg",
@@ -42,9 +44,11 @@ function errorPayload(error: UploadError) {
 
 function validateSettlementUpload(file: Express.Multer.File): UploadError | null {
   const fileName = normalizeFileName(file.originalname);
-  if (!settlementExtensions.has(path.extname(fileName).toLowerCase())
-    || Boolean(file.mimetype && file.mimetype !== "application/octet-stream" && !settlementMimeTypes.has(file.mimetype))) {
-    return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF、PNG 和 JPG 文件" };
+  const mimeType = file.mimetype.toLowerCase();
+  const isImage = mimeType.startsWith("image/");
+  if ((!settlementExtensions.has(path.extname(fileName).toLowerCase()) && !isImage)
+    || Boolean(mimeType && mimeType !== "application/octet-stream" && !settlementMimeTypes.has(mimeType) && !isImage)) {
+    return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF 和图片文件" };
   }
 
   const rejectedReason = settlementFileRejectionReason(fileName);
@@ -141,9 +145,11 @@ tasksRouter.get("/review-items", async (req, res, next) => {
       return res.status(400).json({ error: { code: "INVALID_REVIEW_STATUS", message: "包含不支持的审核状态", requestId: crypto.randomUUID() } });
     }
     const result = await listReviewRecords({ page, pageSize, statuses });
+    const parentTasks = await getTaskRecords(result.items.flatMap((item) => item.taskRecordId ? [item.taskRecordId] : []));
+    const parentTasksById = new Map(parentTasks.map((task) => [task.id, task]));
     return res.json({
       data: {
-        items: result.items.map(toReviewListRow),
+        items: result.items.map((item) => toReviewListRow(item, parentTasksById.get(item.taskRecordId ?? "") ?? null)),
         page,
         pageSize,
         hasMore: result.hasMore,
@@ -208,8 +214,19 @@ export function toSummary(task: StoredTask) {
       differenceAmount: task.differenceAmount?.toString() ?? null,
       scopeMismatch: isScopeMismatchTask(task),
     },
+    comparisonNote: comparisonNote(task.rawAgentJson),
     createdAt: task.createdAt, completedAt: task.completedAt, createdBy: task.createdBy,
   };
+}
+
+function comparisonNote(rawAgentJson: string | null) {
+  if (!rawAgentJson) return null;
+  try {
+    const basisReason = String((JSON.parse(rawAgentJson) as Record<string, unknown>).basisReason ?? "").trim();
+    return basisReason.match(/扣点对比：[^。]{1,260}/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function isScopeMismatchTask(task: StoredTask) {
@@ -235,31 +252,40 @@ export function toDetail(task: StoredTask, reviewItems: StoredReviewItem[]) {
     failure: task.failureReason ? { code: "RECONCILIATION_FAILED", message: task.failureReason } : null,
     reviewItems: reviewItems.map((item) => ({
       id: item.id, rowLabel: item.title, fieldName: item.title,
-      differenceAmount: item.differenceAmount?.toString() ?? null,
+      settlementValue: task.settlementAmount?.toString() ?? null,
+      erpValue: task.erpAmount?.toString() ?? null,
+      differenceAmount: (item.differenceAmount ?? task.differenceAmount)?.toString() ?? null,
       status: item.status, message: item.message, suggestion: item.suggestion,
-      payload: { rowLabel: item.title, fieldName: item.title, message: item.message, suggestion: item.suggestion },
+      payload: {
+        rowLabel: item.title,
+        fieldName: item.title,
+        settlementAmount: task.settlementAmount?.toString() ?? null,
+        erpAmount: task.erpAmount?.toString() ?? null,
+        message: item.message,
+        suggestion: item.suggestion,
+      },
       resolvedAt: item.resolvedAt,
     })),
     progressLogs: getTaskProgress(task.id),
   };
 }
 
-function toReviewListRow(item: StoredReviewItem) {
-  const taskId = item.taskRecordId ?? item.taskId;
+export function toReviewListRow(item: StoredReviewItem, parentTask: StoredTask | null = null) {
+  const taskId = parentTask?.id ?? item.taskRecordId ?? item.taskId;
   return {
     task: {
       id: taskId,
-      name: item.shopNo ? `${item.shopNo} 差异` : item.taskId,
-      status: item.status === "PENDING" ? "NEEDS_REVIEW" : "REVIEWED",
-      periodLabel: null,
+      name: parentTask?.shopNo ?? item.shopNo ?? item.taskId,
+      status: parentTask?.status ?? (item.status === "PENDING" ? "NEEDS_REVIEW" : "REVIEWED"),
+      periodLabel: parentTask?.period ?? null,
     },
     item: {
       id: item.id,
       rowLabel: item.title,
       fieldName: item.title,
-      settlementValue: null,
-      erpValue: null,
-      differenceAmount: item.differenceAmount?.toString() ?? null,
+      settlementValue: parentTask?.settlementAmount?.toString() ?? null,
+      erpValue: parentTask?.erpAmount?.toString() ?? null,
+      differenceAmount: (item.differenceAmount ?? parentTask?.differenceAmount)?.toString() ?? null,
       status: item.status,
       message: item.message,
       suggestion: item.suggestion,

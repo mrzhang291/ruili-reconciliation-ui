@@ -140,17 +140,19 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
   }, [replaceActiveTaskIds]);
 
   const monitorTask = useCallback(async (taskId: string, logLabel?: string, notifyComplete = true) => {
-    const deadline = Date.now() + pollTimeoutMs;
-    let current = await getTaskWithRetry(taskId, deadline, appendLog);
+    let processingDeadline: number | null = null;
+    const currentDeadline = () => processingDeadline ?? Number.POSITIVE_INFINITY;
+    let current = await getTaskWithRetry(taskId, currentDeadline(), appendLog);
     const shouldPrefixLogs = Boolean(logLabel);
     let label = logLabel;
 
     while (current.status === "QUEUED" || current.status === "PROCESSING") {
+      if (current.status === "PROCESSING" && !processingDeadline) processingDeadline = Date.now() + pollTimeoutMs;
       if (shouldPrefixLogs) label ??= current.settlementFile.name || current.name || taskId;
       upsertServerLogs(decorateTaskLogs(taskId, label, current.progressLogs));
-      if (Date.now() >= deadline) throw new Error("对账处理超时，请在总览中查看任务状态");
+      if (Date.now() >= currentDeadline()) throw new Error("对账处理超时，请在总览中查看任务状态");
       await wait(pollIntervalMs);
-      current = await getTaskWithRetry(taskId, deadline, appendLog);
+      current = await getTaskWithRetry(taskId, currentDeadline(), appendLog);
     }
 
     const displayLabel = label ?? (current.settlementFile.name || current.name || taskId);

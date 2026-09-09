@@ -24,6 +24,7 @@ export function TaskDetailDrawer({ selected, onClose }: TaskDetailDrawerProps) {
           <div><dt>执行人</dt><dd>{selected.owner}</dd></div>
           <div><dt>结算单</dt><dd>{selected.settlement}</dd></div>
           <div><dt>ERP 资料</dt><dd>{selected.erp}</dd></div>
+          {selected.comparisonNote && <div><dt>扣点对比</dt><dd>{selected.comparisonNote}</dd></div>}
           {selected.failure && <div><dt>{selected.status === "cancelled" ? "停止原因" : "失败原因"}</dt><dd className="failure-message">{selected.failure}</dd></div>}
         </dl>
       </aside>

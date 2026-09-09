@@ -7,9 +7,12 @@ const rejectedNamePatterns: Array<[RegExp, string]> = [
   [/供应商对账统计|对账统计表/, "供应商统计表不是结算单"],
   [/业绩确认/, "业绩确认表不是结算单"],
   [/扣款明细/, "扣款明细请作为人工附件处理，不作为结算单上传"],
-  [/明细/, "明细文件请作为人工附件处理，不作为结算单上传"],
-  [/费用清单/, "费用清单请作为人工附件处理，不作为结算单上传"],
-  [/租赁/, "租赁资料请作为人工附件处理，不作为结算单上传"],
+];
+
+const manualReviewNamePatterns: Array<[RegExp, string]> = [
+  [/明细/, "文件名含“明细”，需人工确认其是否为结算依据；确认店铺号、账期或金额后再执行"],
+  [/费用清单/, "文件名含“费用清单”，需人工确认其是否为结算依据；确认店铺号、账期或金额后再执行"],
+  [/租赁/, "文件名含“租赁”，需人工确认其是否为结算依据；确认店铺号、账期或金额后再执行"],
 ];
 const explicitMultiShopDelimiterPattern = /[&＆、,，+＋]/;
 
@@ -21,7 +24,6 @@ function normalizeIncomingFileName(fileName: string) {
 }
 
 export function settlementFileRejectionReason(fileName: string) {
-  const baseName = path.basename(normalizeIncomingFileName(fileName));
   const hardRejectedReason = settlementFileHardRejectionReason(fileName);
   if (hardRejectedReason) return hardRejectedReason;
 
@@ -39,4 +41,12 @@ export function settlementFileHardRejectionReason(fileName: string) {
   }
 
   return null;
+}
+
+export function settlementFileManualReviewReason(fileName: string) {
+  if (settlementFileHardRejectionReason(fileName)) return null;
+
+  const baseName = path.basename(normalizeIncomingFileName(fileName));
+  const matchedRule = manualReviewNamePatterns.find(([pattern]) => pattern.test(baseName));
+  return matchedRule?.[1] ?? null;
 }

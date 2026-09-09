@@ -21,6 +21,7 @@ export type ReconciliationView = {
   status: DisplayStatus;
   time: string;
   owner: string;
+  comparisonNote?: string | null;
   failure?: string | null;
 };
 
@@ -91,6 +92,7 @@ export function toViewModel(task: ReconciliationTaskSummary): ReconciliationView
     status: displayStatus(task.status),
     time: formatTaskTime(task.createdAt),
     owner: task.createdBy.name,
+    comparisonNote: task.comparisonNote,
   };
 }
 

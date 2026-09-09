@@ -12,7 +12,10 @@ import {
   isExcelFileName,
   readExcelSettlementDocuments,
 } from "../lib/excel-settlement.js";
-import { settlementFileHardRejectionReason } from "../lib/settlement-file-rules.js";
+import {
+  settlementFileHardRejectionReason,
+  settlementFileManualReviewReason,
+} from "../lib/settlement-file-rules.js";
 import {
   buildBatchExportCsv,
   buildBatchExecutionGroups,
@@ -36,15 +39,16 @@ export const batchesRouter = Router();
 const batchMaxFiles = 30;
 const batchMaxTotalBytes = 200 * 1024 * 1024;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
-const settlementExtensions = new Set([".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"]);
+const settlementExtensions = new Set([".xlsx", ".xls", ".xlsm", ".pdf", ".png", ".jpg", ".jpeg"]);
 const settlementMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
   "application/pdf",
   "image/png",
   "image/jpeg",
 ]);
-const readinessIssuePattern = /(文件名未识别到主体|文件名包含多个主体|未从文件名识别到账期|Excel 本地金额候选|执行时将按单文件流程|执行时将由 CherryStudio Agent|执行时将交给 Agent)/;
+const readinessIssuePattern = /(文件名未识别到主体|文件名包含多个主体|未从文件名识别到账期|文件名含“(?:明细|费用清单|租赁)”，需人工确认|Excel 本地金额候选|执行时将按单文件流程|执行时将由 CherryStudio Agent|执行时将交给 Agent)/;
 
 type UploadError = { code: string; message: string };
 
@@ -496,7 +500,7 @@ async function precheckSettlementFile(
   const fileTypeError = validateBatchSettlementUpload(stored.originalName, file.mimetype);
   if (fileTypeError) {
     issues.push(fileTypeError.message);
-    status = "REJECTED";
+    status = fileTypeError.code === "MANUAL_CONFIRMATION_REQUIRED" ? "NEEDS_REVIEW" : "REJECTED";
   }
   if (context.index >= batchMaxFiles) {
     issues.push(`单次最多 ${batchMaxFiles} 份，超出部分不会执行`);
@@ -651,18 +655,19 @@ function findDocument(documentId: string) {
 }
 
 export function validateBatchSettlementUpload(fileName: string, mimetype = "application/octet-stream"): UploadError | null {
-  if (!settlementExtensions.has(path.extname(fileName).toLowerCase())
-    || Boolean(mimetype && mimetype !== "application/octet-stream" && !settlementMimeTypes.has(mimetype))) {
-    return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF、PNG 和 JPG 文件" };
+  const mimeType = mimetype.toLowerCase();
+  const isImage = mimeType.startsWith("image/");
+  if ((!settlementExtensions.has(path.extname(fileName).toLowerCase()) && !isImage)
+    || Boolean(mimeType && mimeType !== "application/octet-stream" && !settlementMimeTypes.has(mimeType) && !isImage)) {
+    return { code: "INVALID_FILE_TYPE", message: "仅支持 Excel、PDF 和图片文件" };
   }
   const rejectedReason = settlementFileHardRejectionReason(fileName);
   if (rejectedReason) return { code: "NOT_SETTLEMENT_FILE", message: rejectedReason };
-  return null;
-}
 
-function isExecutableDocument(document: BatchDocumentState) {
-  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(document.status)
-    && !document.taskId;
+  const manualReviewReason = settlementFileManualReviewReason(fileName);
+  if (manualReviewReason) return { code: "MANUAL_CONFIRMATION_REQUIRED", message: manualReviewReason };
+
+  return null;
 }
 
 function toTaskUploadFile(file: BatchDocumentState["file"]) {

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { SettlementExtractionResult } from "./cherrystudio.js";
 import { extractShopCodesFromFileName } from "./erp-base-query.js";
 
-const excelExtensions = new Set([".xlsx", ".xls"]);
+const excelExtensions = new Set([".xlsx", ".xls", ".xlsm"]);
 const pythonScript = String.raw`
 import json, math, os, sys
 
@@ -26,7 +26,7 @@ def add_sheet(name, sheet_rows):
     sheets.append({"name": name, "rows": sheet_rows})
     rows.extend(sheet_rows)
 
-if ext == ".xlsx":
+if ext in (".xlsx", ".xlsm"):
     import openpyxl.reader.excel as excel
     try:
         workbook = excel.load_workbook(path, read_only=True, data_only=True)

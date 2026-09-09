@@ -35,6 +35,8 @@ test("matches ERP rows by shop number only", () => {
 test("extracts ERP lookup keys from settlement file names", () => {
   assert.deepEqual(extractShopCodesFromFileName("SHAD74&SHNK77结算单-202605.xlsx"), ["SHAD74", "SHNK77"]);
   assert.deepEqual(extractShopCodesFromFileName("HZAD02-5月结算单.pdf"), ["HZAD02"]);
+  assert.deepEqual(extractShopCodesFromFileName("HZAD71 (杭州之江银泰百货)0结算单，备注发票号(2).pdf"), ["HZAD71"]);
+  assert.deepEqual(extractShopCodesFromFileName("HZAD71 (杭州之江银泰百货)结算单05.pdf"), ["HZAD71"]);
   assert.deepEqual(extractShopCodesFromFileName("Sheet1"), []);
   assert.deepEqual(buildErpLookupKeys("SHNKA2结算单-202605.pdf"), ["SHNKA2"]);
   assert.deepEqual(buildErpLookupKeys("账单1.pdf", "SHNKA2"), []);

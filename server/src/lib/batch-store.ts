@@ -91,7 +91,6 @@ type BatchGroupAccumulator = {
   shopNo: string;
   period: string | null;
   version: number;
-  splitStem: string | null;
   documents: BatchDocumentState[];
 };
 
@@ -427,8 +426,7 @@ function countDocuments(state: BatchState) {
 }
 
 function isExecutableDocument(document: BatchDocumentState) {
-  return !["REJECTED", "DUPLICATE", "PROCESSING", "SUCCEEDED", "CANCELLED"].includes(document.status)
-    && !document.taskId;
+  return document.status === "READY" && !document.taskId;
 }
 
 export function buildBatchExecutionGroups(state: BatchState): BatchExecutionGroup[] {
@@ -556,7 +554,7 @@ export function rebuildBatchGroups(state: BatchState) {
       return [];
     }
     const { key, shopNo, period, version, documents } = group;
-    const id = `${state.id}-${shopNo}-${period ? period.replace("-", "") : `pending-${shortHash(group.splitStem ?? key)}`}-v${version}`;
+    const id = `${state.id}-${shopNo}-${period ? period.replace("-", "") : `pending-${shortHash(key)}`}-v${version}`;
     for (const document of documents) document.groupId = id;
     const statuses = documents.map((document) => document.status);
     const status: BatchDocumentStatus = statuses.includes("PROCESSING") ? "PROCESSING"
@@ -622,32 +620,17 @@ function batchGroupCandidate(document: BatchDocumentState): Omit<BatchGroupAccum
       shopNo: document.shopNo,
       period: document.period,
       version,
-      splitStem: null,
     };
   }
 
-  const splitStem = splitFileGroupStem(document.fileName);
-  const normalizedShopNo = document.shopNo.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
-  if (!splitStem || !splitStem.toUpperCase().includes(normalizedShopNo)) return null;
+  // 文件名能唯一识别店铺号但不能识别账期时，先按店铺形成待识别分组。
+  // 这样不同命名习惯的拆单可一并交给 Agent 从正文确认账期；最终账期不一致时由对账结果进入审核，而不会静默混算。
   return {
-    key: `${document.shopNo}:pending:${splitStem}:v${version}`,
+    key: `${document.shopNo}:pending:v${version}`,
     shopNo: document.shopNo,
     period: null,
     version,
-    splitStem,
   };
-}
-
-function splitFileGroupStem(fileName: string) {
-  const stem = path.basename(fileName, path.extname(fileName)).normalize("NFKC").replace(/\s+/g, "");
-  const part = "(?:part)?([0-9]+|[一二三四五六七八九十]+)";
-  const separated = new RegExp(`^(.+?)[-_－—]+(?:第)?${part}(?:份|张|页|部分|part)?$`, "i").exec(stem);
-  const suffixed = new RegExp(`^(.+?结算单)(?:第)?${part}(?:份|张|页|部分|part)?$`, "i").exec(stem);
-  const match = separated ?? suffixed;
-  if (!match) return null;
-  const numericPart = match[2];
-  if (/^\d+$/.test(numericPart) && Number(numericPart) > 50) return null;
-  return match[1].toUpperCase();
 }
 
 function shortHash(value: string) {

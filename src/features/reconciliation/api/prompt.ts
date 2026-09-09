@@ -70,7 +70,7 @@ ${params.taskWorkDir}
 - 结算单：${params.settlementFilePath}
 
 在过程中，面对图片、PDF 等文件，你可以使用 mineru 这个项目 Subagent 获取 Markdown 格式的内容。
-如果结算单是 .xlsx 或 .xls，禁止使用 MinerU、OCR 或 Subagent 读取；请直接用 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python ... 调用 openpyxl/xlrd 读取工作表。
+如果结算单是 .xlsx、.xls 或 .xlsm，禁止使用 MinerU、OCR 或 Subagent 读取；请直接用 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python ... 调用 openpyxl/xlrd 读取工作表。
 在 Windows 或 Git Bash 环境执行 Python/MinerU 脚本时，严禁运行 python3；不要先调用 WindowsApps 里的 python3，本机 python3 指向 WindowsApps 占位命令且会失败。必须使用 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python ...，如果 python 不可用再用 py ...。如果调用 mineru Subagent，请把这条 Python 约束原文转交给 Subagent。
 
 请按下面三步完成：
@@ -85,7 +85,7 @@ ${params.taskWorkDir}
 如果同组结算单合并后的本期实销/销售额为 0 或负数，不要仅因金额为负就判异常；只要字段口径明确属于销售额口径且与 ERP/DRP sales_total 在 200 元内对平，可输出 matched=true。扣点、手续费、快递费、含税结账金额和最终应付款只作为口径判断证据，除非它们证明 settlementAmount 选错或 ERP/DRP 范围不可比，否则不要写入 issues。
 如果 erpBasis 明确且 difference 绝对值不超过 200 元，应输出 matched=true；普通舍入、尾差或阈值内自然差额不要写入 issues，issues 只记录需要人工审核的异常。
 金额和口径已经可确定且 difference 绝对值不超过 200 元时，只有会影响 settlementAmount 或 ERP/DRP 口径可信度的异常才写入 issues；不要把不影响本次 sales_total/net_sales_total 对比的扣率说明、费用科目说明、内部比例观察写入 issues。
-如果 MCP 返回多条明细，而结算单明显只覆盖其中一部分合同、铺位、扣率或活动，不要把店铺号汇总金额强行解释为普通差额。必须先用 MCP rows 按扣率行枚举可疑子集：若某个子集在 200 元内且能被结算单合同/铺位/扣率/活动证据支持，在 issues 中写明“ERP子集可对平，需按该范围复核”；若没有子集可对平，在 issues 开头写明“ERP聚合范围与结算单范围不一致，范围不可比”，列出最接近的扣率子集及其差额，并说明 full-shop difference 仅用于定位范围缺口，不作为可结算差额或业务定责金额。最终 JSON 的 salesTotal/netSalesTotal 仍必须是 MCP 返回的全店汇总值，difference 仍按 erpAmount - settlementAmount 填写以满足后端契约。
+每份对账结果都必须先核对结算单和 ERP 的扣点档位。无论是否有 issues，basisReason 首句固定为“扣点对比：结算单 X%；ERP Y%；扣点一致/不一致/无法比较。”；扣点一致时，首句还必须写“金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”，后面再简述选用的金额口径。issues 最多只输出两句：第一句固定为“结算单扣点：X%；ERP扣点：Y%。”，X/Y 写已核实的全部扣点档；如扣点档一致，第二句固定写“扣点档一致；金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”；ERP 多出或缺少档位时，第二句直接写出档位及“可能包含其他合同、柜组或活动”。如任一侧未取得可靠分档，明确写“未提取/未提供分档”，不得猜测。不要列计算过程、最接近子集、Agent 理由或补资料建议。最终 JSON 的 salesTotal/netSalesTotal 仍必须是 MCP 返回的全店汇总值，difference 仍按 erpAmount - settlementAmount 填写以满足后端契约。
 
 当前项目 ERP/DRP MCP server id 为 wd3FCVOL5nMNLODNeRfOr，工具名为 summarize_store_period，本地配置文件在项目根目录 .mcp.json。ERP/DRP MCP 查询必须由当前会话直接完成，不要交给 Subagent；不要调用 CherryStudio 原生工具列表里的同名 MCP 工具，请按 .mcp.json 中 command/args 直接运行本地 MCP JSON-RPC。
 
