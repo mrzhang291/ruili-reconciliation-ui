@@ -13,6 +13,7 @@ const viewLabels: Record<WorkspaceView, string> = {
   batch: "批量对账",
   overview: "对账总览",
   review: "差异处理",
+  mail: "QQ 邮箱",
   erp: "ERP 明细",
   erpImport: "新增 ERP",
   settings: "连接设置",

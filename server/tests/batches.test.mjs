@@ -3,12 +3,19 @@ import test from "node:test";
 import { buildBatchExecutionGroups, buildBatchExportCsv, mergeTargetDocumentsForSync, rebuildBatchGroups } from "../dist/lib/batch-store.js";
 import {
   applyDocumentTaskInterrupted,
+  applyDocumentTaskQueued,
   applyDocumentTaskStarted,
   parseManualSettlementAmount,
   settledDocumentIssues,
   unresolvedSplitGroupScopeReviewNote,
   validateBatchSettlementUpload,
 } from "../dist/routes/batches.js";
+
+test("marks newly persisted batch work as queued before a worker starts", () => {
+  const document = { status: "READY", taskId: null, updatedAt: "old" };
+  applyDocumentTaskQueued(document, "rec123", "now");
+  assert.deepEqual(document, { status: "QUEUED", taskId: "rec123", updatedAt: "now" });
+});
 
 test("marks pending batch documents as processing when a task starts", () => {
   const document = { status: "READY", taskId: null, updatedAt: "old" };
@@ -491,6 +498,19 @@ test("settled batch documents show task review reasons instead of precheck hints
 
   assert.deepEqual(issues, ["总差额（差额 301.00）：所选口径差额超过阈值"]);
   assert.deepEqual(settledDocumentIssues(["执行时将按单文件流程交给 CherryStudio Agent 抽取结算金额"], "SUCCEEDED"), []);
+});
+
+test("missing ERP batch documents do not inherit a synthetic formula difference", () => {
+  const issues = settledDocumentIssues(
+    [],
+    "NEEDS_REVIEW",
+    [{ title: "ERP金额待核对", message: "ERP/DRP 未找到记录", differenceAmount: -101234.56, suggestion: null }],
+    null,
+    true,
+  );
+
+  assert.deepEqual(issues, ["ERP金额待核对：ERP/DRP 未找到记录"]);
+  assert.doesNotMatch(issues[0], /差额/);
 });
 
 test("manual settlement amount accepts zero and negative values", () => {

@@ -16,6 +16,7 @@ import { ProcessLogPanel } from "./ProcessLogPanel";
 
 const precheckStatusLabels: Record<BatchPrecheckItemStatus, string> = {
   READY: "可执行",
+  QUEUED: "排队中",
   NEEDS_REVIEW: "待确认",
   REJECTED: "已跳过",
   DUPLICATE: "已去重",
@@ -27,6 +28,7 @@ const precheckStatusLabels: Record<BatchPrecheckItemStatus, string> = {
 
 const precheckStatusClasses: Record<BatchPrecheckItemStatus, string> = {
   READY: "ready",
+  QUEUED: "review",
   NEEDS_REVIEW: "review",
   REJECTED: "rejected",
   DUPLICATE: "duplicate",
@@ -103,7 +105,7 @@ export function BatchReconciliationView() {
   const canStart = activePrecheckResult ? canExecute : canPrecheck;
   const filePreview = batchFiles.slice(0, 10);
   const pendingPrecheckCount = activePrecheckResult?.items.filter((item) => item.status === "NEEDS_REVIEW" && !item.taskId && !isRunnableBatchItem(item)).length ?? 0;
-  const hasProcessingBatchItem = activePrecheckResult?.items.some((item) => item.status === "PROCESSING") ?? false;
+  const hasProcessingBatchItem = activePrecheckResult?.items.some((item) => item.status === "QUEUED" || item.status === "PROCESSING") ?? false;
   const totalSize = batchFiles.reduce((sum, file) => sum + file.size, 0);
 
   useEffect(() => {

@@ -27,8 +27,8 @@ export type ReconciliationView = {
 
 export const statusLabels: Record<DisplayStatus, string> = {
   success: "对账成功",
-  issue: "待审核",
-  reviewed: "已复核",
+  issue: "待确认",
+  reviewed: "已处理",
   failed: "对账失败",
   processing: "对账中",
   cancelled: "已停止",

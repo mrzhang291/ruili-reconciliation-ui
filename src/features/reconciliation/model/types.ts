@@ -85,6 +85,52 @@ export type ReconciliationReviewRow = {
   item: ReconciliationReviewItem;
 };
 
+export type ReviewWorklistCategoryCode =
+  | "ERP_MISSING"
+  | "RATE_INCOMPLETE"
+  | "RATE_MISMATCH"
+  | "SCOPE_MISMATCH"
+  | "CROSS_MONTH_ADJUSTMENT"
+  | "BASIS_AMBIGUOUS"
+  | "RATE_MATCHED_AMOUNT_MISMATCH"
+  | "AMOUNT_MISMATCH"
+  | "FIELD_UNCLEAR";
+
+export type ReviewWorklistPriorityLevel = "HIGH" | "MEDIUM" | "LOW";
+
+export type ReconciliationReviewWorklistRow = ReconciliationReviewRow & {
+  classification: {
+    code: ReviewWorklistCategoryCode;
+    label: string;
+    detail: string;
+    tags: string[];
+  };
+  priority: {
+    level: ReviewWorklistPriorityLevel;
+    label: string;
+    reason: string;
+    score: number;
+  };
+  confirmation: {
+    question: string;
+    requiredFields: string[];
+    communicationTemplate: string;
+  };
+  evidence: {
+    formula: string;
+    settlementBasis: string | null;
+    erpBasisLabel: string | null;
+    basisReason: string | null;
+    settlementFileName: string | null;
+  };
+  candidateRule: {
+    label: string;
+    occurrences: number;
+    confirmedOccurrences: number;
+    description: string;
+  } | null;
+};
+
 export type ReconciliationStatistics = {
   month: string;
   totalTasks: number;
@@ -138,7 +184,7 @@ export type PrecheckBatchInput = {
   settlementFiles: File[];
 };
 
-export type BatchPrecheckItemStatus = "READY" | "NEEDS_REVIEW" | "REJECTED" | "DUPLICATE" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type BatchPrecheckItemStatus = "READY" | "QUEUED" | "NEEDS_REVIEW" | "REJECTED" | "DUPLICATE" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
 
 export type BatchAmountCandidate = {
   id: string;
@@ -192,7 +238,7 @@ export type BatchGroupSummary = {
 
 export type BatchPrecheckResult = {
   batchId: string;
-  status: "DRAFT" | "READY" | "PROCESSING" | "NEEDS_REVIEW" | "COMPLETED" | "FAILED" | "CANCELLED";
+  status: "DRAFT" | "READY" | "QUEUED" | "PROCESSING" | "NEEDS_REVIEW" | "COMPLETED" | "FAILED" | "CANCELLED";
   totalFiles: number;
   totalSize: number;
   validFiles: number;
@@ -212,7 +258,7 @@ export type BatchReconciliationTaskCreateItem = {
   fileName: string;
   groupId?: string | null;
   taskId: string | null;
-  status: "PROCESSING" | "REJECTED" | "FAILED";
+  status: "QUEUED" | "REJECTED" | "FAILED";
   error: { code: string; message: string } | null;
   logs: ReconciliationProcessLog[];
 };

@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { LarkCliError } from "../lib/lark-cli.js";
+import { deleteStoredFilePath } from "../lib/file-storage.js";
 
 export class ApiError extends Error {
   constructor(
@@ -22,6 +23,22 @@ export function notFoundHandler(req: Request, res: Response) {
   });
 }
 
+function discardPartialUploads(req: Request) {
+  const files = Array.isArray(req.files)
+    ? req.files
+    : req.files && typeof req.files === "object"
+      ? Object.values(req.files).flat()
+      : req.file ? [req.file] : [];
+  for (const file of files) {
+    if (!file.path) continue;
+    try {
+      deleteStoredFilePath(file.path);
+    } catch {
+      // The original upload error is more useful than cleanup failure.
+    }
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function errorHandler(error: unknown, req: Request, res: Response, _next: NextFunction) {
   const requestId = crypto.randomUUID();
@@ -41,6 +58,7 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
 
   // multer 文件大小限制
   if (error instanceof Error && error.name === "MulterError") {
+    discardPartialUploads(req);
     const status = error.message.includes("File too large") ? 413 : 400;
     return res.status(status).json({
       error: { code: "UPLOAD_ERROR", message: error.message, requestId },

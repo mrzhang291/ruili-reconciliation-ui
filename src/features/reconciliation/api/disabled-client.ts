@@ -1,6 +1,6 @@
 // 文件说明：CherryStudio 地址未配置时使用的空接口，避免前端误造假数据。
 import { ReconciliationApiError } from "./error";
-import type { ReconciliationApi } from "./types";
+import type { ReconciliationApi, ReviewExportFilters } from "./types";
 import type {
   PrecheckBatchInput,
   BatchPrecheckResult,
@@ -88,6 +88,12 @@ export class DisabledReconciliationApi implements ReconciliationApi {
     throw new ReconciliationApiError("未配置真实后端接口，无法导出批量对账", "API_BASE_URL_REQUIRED", "local-no-api", 503);
   }
 
+  async exportReviewCsv(filters: ReviewExportFilters = {}): Promise<never> {
+    void filters;
+    await wait(120);
+    throw new ReconciliationApiError("未配置真实后端接口，无法导出差异明细", "API_BASE_URL_REQUIRED", "local-no-api", 503);
+  }
+
   async importErpFile(): Promise<never> {
     await wait(120);
     throw new ReconciliationApiError(
@@ -157,6 +163,11 @@ export class DisabledReconciliationApi implements ReconciliationApi {
   }
 
   async listReviewItems() {
+    await wait(120);
+    return [];
+  }
+
+  async listReviewWorklist() {
     await wait(120);
     return [];
   }

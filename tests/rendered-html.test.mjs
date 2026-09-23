@@ -5,7 +5,7 @@ import test from "node:test";
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 function extractPromptTemplate(fileSource) {
-  const match = fileSource.match(/return `(我有一个对账任务：[\s\S]*?后端会拒绝不符合契约的结果。)`/);
+  const match = fileSource.match(/return `(我有一个对账任务：[\s\S]*?其他不符合契约的结果仍会被后端拒绝。)`;/);
   assert.ok(match, "未找到对账 Prompt 模板");
   return match[1].replaceAll("\r\n", "\n");
 }
@@ -48,6 +48,10 @@ test("routes reconciliation through the HTTP backend", async () => {
     processLogPanel,
     modelTypes,
     reviewHook,
+    reviewWorklistHook,
+    reviewView,
+    mailboxView,
+    qqMailClient,
     overview,
     serverTasks,
     serverBatches,
@@ -56,8 +60,10 @@ test("routes reconciliation through the HTTP backend", async () => {
     erpImport,
     serverReviewItems,
     serverFiles,
+    serverMail,
     reconciliationService,
-    promptTemplate,
+    qqMail,
+    serverConfig,
     cherryStudio,
     erpBaseQuery,
     excelSettlement,
@@ -83,6 +89,10 @@ test("routes reconciliation through the HTTP backend", async () => {
     source("../src/features/reconciliation/components/ProcessLogPanel.tsx"),
     source("../src/features/reconciliation/model/types.ts"),
     source("../src/features/reconciliation/hooks/use-review-items.ts"),
+    source("../src/features/reconciliation/hooks/use-review-worklist.ts"),
+    source("../src/features/reconciliation/components/ReviewView.tsx"),
+    source("../src/features/reconciliation/components/MailboxView.tsx"),
+    source("../src/features/reconciliation/api/qq-mail-client.ts"),
     source("../src/features/reconciliation/components/OverviewView.tsx"),
     source("../server/src/routes/tasks.ts"),
     source("../server/src/routes/batches.ts"),
@@ -91,8 +101,10 @@ test("routes reconciliation through the HTTP backend", async () => {
     source("../server/src/lib/erp-import.ts"),
     source("../server/src/routes/review-items.ts"),
     source("../server/src/routes/files.ts"),
+    source("../server/src/routes/mail.ts"),
     source("../server/src/services/reconciliation.ts"),
-    source("../src/features/reconciliation/api/prompt.ts"),
+    source("../server/src/lib/qq-mail.ts"),
+    source("../server/src/lib/config.ts"),
     source("../server/src/lib/cherrystudio.ts"),
     source("../server/src/lib/erp-base-query.ts"),
     source("../server/src/lib/excel-settlement.ts"),
@@ -149,26 +161,96 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(modelTypes, /BatchAmountCandidate/);
   assert.doesNotMatch(modelTypes, /apiKey: string/);
   assert.match(modelTypes, /ReconciliationReviewRow/);
+  assert.match(modelTypes, /ReconciliationReviewWorklistRow/);
   assert.match(httpClient, /listReviewItems/);
+  assert.match(httpClient, /listReviewWorklist/);
+  assert.match(httpClient, /review-items\/worklist/);
+  const worklistSource = httpClient.match(/async listReviewWorklist[\s\S]*?\n {2}}\n\n {2}async getTask/)?.[0] ?? "";
+  assert.match(worklistSource, /cache: "no-store"/);
+  assert.doesNotMatch(worklistSource, /this\.cached\(/);
+  assert.match(httpClient, /exportReviewCsv/);
   assert.match(serverTasks, /tasksRouter\.get\("\/review-items"/);
+  assert.match(serverTasks, /review-items\/worklist/);
+  assert.match(serverTasks, /buildReviewWorklist/);
+  assert.match(serverTasks, /review-items\/export/);
+  assert.match(serverTasks, /业务结论/);
+  assert.match(serverTasks, /Cache-Control", "no-store/);
   assert.match(serverTasks, /listReviewRecords/);
   assert.match(reviewHook, /reconciliationApi\.updateReviewItem/);
   assert.match(reviewHook, /reconciliationApi\.listReviewItems/);
+  assert.match(reviewHook, /reconciliationApi\.listReviewWorklist/);
+  assert.match(reviewHook, /Promise\.allSettled/);
+  assert.match(reviewWorklistHook, /reconciliationApi\.listReviewWorklist/);
+  assert.match(reviewWorklistHook, /refreshWorklist/);
+  assert.match(reviewWorklistHook, /latestLoadIdRef/);
+  assert.doesNotMatch(reviewWorklistHook, /updateReviewItem/);
+  assert.match(reviewView, /差异处理/);
+  assert.match(reviewView, /review-table/);
+  assert.match(reviewView, /处理状态/);
+  assert.match(reviewView, /setReviewStatus/);
+  assert.match(reviewView, /查看沟通话术/);
+  assert.match(reviewView, /communication\.confirmation\.communicationTemplate/);
+  assert.match(reviewView, /copyCommunicationTemplate/);
+  assert.match(reviewView, /reconciliationApi\.exportReviewCsv/);
+  assert.match(reviewView, /reviewRegion/);
+  assert.match(reviewView, /statusFilter/);
+  assert.match(reviewView, /计算差额（元）/);
+  assert.match(reviewView, /filteredRows/);
+  assert.match(reviewView, /导出筛选结果/);
+  assert.match(reviewView, /differenceRangeError/);
+  assert.match(reviewView, /hasReviewStatusUpdates/);
+  assert.match(reviewView, /isReviewStatusUpdating\(\)/);
+  assert.match(reviewView, /region === "其他" \? "OTHER"/);
+  assert.match(reviewHook, /updatingItemCounts/);
+  assert.match(reviewHook, /updatingItemCountsRef/);
+  assert.match(httpClient, /errorPayload\?\.error\?\.message/);
+  assert.match(httpClient, /errorPayload\?\.error\?\.requestId/);
+  assert.match(mailboxView, /QQ 邮箱/);
+  assert.match(mailboxView, /SMTP 授权码/);
+  assert.match(mailboxView, /statusRequestRevisionRef/);
+  assert.match(mailboxView, /const persistedStatus = await qqMailApi\.getStatus\(\)/);
+  assert.match(mailboxView, /saveRevision !== statusRequestRevisionRef\.current/);
+  assert.match(mailboxView, /未能确认 QQ 发件设置已保存/);
+  assert.match(mailboxView, /qqMailApi\.prepare/);
+  assert.match(mailboxView, /qqMailApi\.send/);
+  assert.match(mailboxView, /window\.confirm/);
+  assert.match(mailboxView, /打开 QQ 邮箱/);
+  assert.match(qqMailClient, /\/api\/mail\/qq\/status/);
+  assert.match(qqMailClient, /authorizationCode/);
+  assert.doesNotMatch(qqMailClient, /localStorage|sessionStorage/);
+  assert.match(serverMail, /mailRouter\.post\("\/qq\/configuration"/);
+  assert.match(serverMail, /mailRouter\.post\("\/qq\/prepare"/);
+  assert.match(serverMail, /mailRouter\.post\("\/qq\/send"/);
+  assert.match(serverMail, /isLoopbackAddress/);
+  assert.match(serverConfig, /host: "smtp\.qq\.com"/);
+  assert.match(qqMail, /windows-credential-manager/);
+  assert.match(qqMail, /tls\.connect/);
+  assert.match(qqMail, /QQ_MAIL_INVALID_RECIPIENTS/);
+  assert.match(qqMail, /buildQqSmtpData/);
+  assert.match(httpClient, /differenceMin/);
+  assert.match(httpClient, /filters\.status/);
   assert.doesNotMatch(reviewHook, /reconciliationApi\.listTasks/);
   assert.match(overview, /window\.confirm/);
   assert.match(overview, /record\.name/);
   assert.match(overview, /ERP金额/);
-  assert.match(overview, /待审核/);
+  assert.match(overview, /待确认/);
   assert.match(app, /BatchReconciliationView/);
   assert.match(app, /ErpDetailsView/);
   assert.match(app, /ErpImportView/);
+  assert.match(app, /MailboxView/);
+  assert.doesNotMatch(app, /reviewFollowUp/);
   assert.match(app, /erpDirty/);
   assert.match(serverIndex, /batchesRouter/);
   assert.match(serverIndex, /app\.use\("\/api\/batches", batchesRouter\)/);
+  assert.match(serverIndex, /app\.use\("\/api\/mail", mailRouter\)/);
   assert.match(sidebar, /批量对账/);
+  assert.match(sidebar, /差异处理/);
+  assert.match(sidebar, /QQ 邮箱/);
   assert.match(sidebar, /ERP 明细/);
   assert.match(sidebar, /新增 ERP/);
   assert.match(topbar, /batch: "批量对账"/);
+  assert.match(topbar, /review: "差异处理"/);
+  assert.match(topbar, /mail: "QQ 邮箱"/);
   assert.match(topbar, /erp: "ERP 明细"/);
   assert.match(topbar, /erpImport: "新增 ERP"/);
   assert.match(erpDetailsView, /保存全部/);
@@ -250,18 +332,7 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(reconciliationService, /飞书知识规则快照/);
   assert.match(reconciliationService, /applyTaskResult/);
   assert.doesNotMatch(reconciliationService, /prisma|pg_advisory/i);
-  assert.match(promptTemplate, /飞书知识规则快照/);
-  assert.match(promptTemplate, /settlementAmountLabel/);
-  assert.match(promptTemplate, /erpBasis/);
-  assert.match(promptTemplate, /本地 MCP JSON-RPC/);
-  assert.match(promptTemplate, /salesTotal/);
-  assert.match(promptTemplate, /netSalesTotal/);
-  assert.match(promptTemplate, /matched/);
-  assert.match(promptTemplate, /禁止使用 MinerU、OCR 或 Subagent/);
-  assert.match(promptTemplate, /不要先调用 WindowsApps 里的 python3/);
-  assert.match(promptTemplate, /格式必须为 "YYYY-MM"/);
   const serverPrompt = extractPromptTemplate(reconciliationService);
-  const uiPrompt = extractPromptTemplate(promptTemplate);
   for (const pattern of [
     /本地 MCP JSON-RPC/,
     /wd3FCVOL5nMNLODNeRfOr/,
@@ -273,13 +344,11 @@ test("routes reconciliation through the HTTP backend", async () => {
     /格式必须为 "YYYY-MM"/,
   ]) {
     assert.match(serverPrompt, pattern);
-    assert.match(uiPrompt, pattern);
   }
   assert.match(serverPrompt, /本地服务脚本/);
   assert.match(serverPrompt, /不要调用 CherryStudio 原生工具列表/);
-  assert.match(uiPrompt, /不要调用 CherryStudio 原生工具列表/);
   assert.match(serverPrompt, /\$\{mcpCommand\}/);
-  assert.match(uiPrompt, /项目根目录 \.mcp\.json/);
+  assert.doesNotMatch(httpClient, /buildReconciliationPrompt|本地 MCP JSON-RPC|summarize_store_period/);
   assert.match(larkKnowledge, /runLarkCli/);
   assert.match(larkCli, /"--profile", config\.lark\.profile/);
   assert.match(larkKnowledge, /"base", "\+record-list"/);

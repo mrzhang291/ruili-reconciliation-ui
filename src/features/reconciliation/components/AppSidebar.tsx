@@ -19,6 +19,7 @@ export function AppSidebar({ view, onViewChange }: AppSidebarProps) {
         <button type="button" className={view === "batch" ? "active" : ""} onClick={() => onViewChange("batch")}><i>批</i><span>批量对账</span></button>
         <button type="button" className={view === "overview" ? "active" : ""} onClick={() => onViewChange("overview")}><i>览</i><span>对账总览</span></button>
         <button type="button" className={view === "review" ? "active" : ""} onClick={() => onViewChange("review")}><i>审</i><span>差异处理</span></button>
+        <button type="button" className={view === "mail" ? "active" : ""} onClick={() => onViewChange("mail")}><i>邮</i><span>QQ 邮箱</span></button>
         <button type="button" className={view === "erp" ? "active" : ""} onClick={() => onViewChange("erp")}><i>表</i><span>ERP 明细</span></button>
         <button type="button" className={view === "erpImport" ? "active" : ""} onClick={() => onViewChange("erpImport")}><i>导</i><span>新增 ERP</span></button>
         <span className="nav-label nav-label--second">系统</span>

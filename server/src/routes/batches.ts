@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { Router } from "express";
-import multer from "multer";
 import { config } from "../lib/config.js";
 import { buildErpLookupKeys, normalizeShopNo } from "../lib/erp-base-query.js";
 import {
@@ -31,14 +30,15 @@ import {
   type BatchDocumentStatus,
   type BatchState,
 } from "../lib/batch-store.js";
-import { approveTaskPendingReviews, failTaskRecord, getTaskDetail, markTaskPendingReviewsScopeMismatch, type StoredReviewItem } from "../lib/lark-store.js";
-import { createReconciliationTask, hasInFlightReconciliationTask, type ProgressLog } from "../services/reconciliation.js";
+import { createStreamingUpload, storedFileFromUpload } from "../lib/file-storage.js";
+import { addSystemMatchEvidenceToPendingReviews, failTaskRecord, getTaskDetail, markTaskPendingReviewsScopeMismatch, taskHasMissingErp, type StoredReviewItem } from "../lib/lark-store.js";
+import { createReconciliationTask, hasInFlightReconciliationTask, registerBatchTaskLifecycle, type ProgressLog } from "../services/reconciliation.js";
 
 export const batchesRouter = Router();
 
 const batchMaxFiles = 30;
 const batchMaxTotalBytes = 200 * 1024 * 1024;
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
+const upload = createStreamingUpload(batchMaxFiles);
 const settlementExtensions = new Set([".xlsx", ".xls", ".xlsm", ".pdf", ".png", ".jpg", ".jpeg"]);
 const settlementMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -90,7 +90,7 @@ function parseAgentSelector(body: unknown): { name: string; workspace?: string }
 }
 
 batchesRouter.post("/", upload.fields([
-  { name: "settlementFiles", maxCount: 200 },
+  { name: "settlementFiles", maxCount: batchMaxFiles },
   { name: "erpFile", maxCount: 1 },
 ]), async (req, res, next) => {
   try {
@@ -126,7 +126,7 @@ batchesRouter.post("/", upload.fields([
     let runningTotalSize = 0;
     for (const [index, settlement] of settlements.entries()) {
       runningTotalSize += settlement.size;
-      const stored = saveBatchUploadedFile(batchId, settlement.buffer, settlement.originalname, settlement.mimetype);
+      const stored = saveBatchUploadedFile(batchId, storedFileFromUpload(settlement));
       state.documents.push(...await precheckSettlementFile(settlement, stored, {
         batchId,
         index,
@@ -204,10 +204,16 @@ batchesRouter.patch("/documents/:documentId/amount", async (req, res, next) => {
   }
 });
 
-batchesRouter.get("/:id", async (req, res) => {
-  const state = readBatchState(req.params.id);
-  if (!state) return res.status(404).json(errorPayload("BATCH_NOT_FOUND", "未找到批量对账批次"));
-  return res.json({ data: toBatchApi(state), requestId: crypto.randomUUID() });
+batchesRouter.get("/:id", async (req, res, next) => {
+  try {
+    const state = readBatchState(req.params.id);
+    if (!state) return res.status(404).json(errorPayload("BATCH_NOT_FOUND", "未找到批量对账批次"));
+    const recoveredDocumentIds = await recoverInterruptedBatchDocuments(state);
+    if (recoveredDocumentIds.length) await syncBatchState(state, recoveredDocumentIds);
+    return res.json({ data: toBatchApi(state), requestId: crypto.randomUUID() });
+  } catch (error) {
+    next(error);
+  }
 });
 
 batchesRouter.get("/:id/export", async (req, res) => {
@@ -241,7 +247,7 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
       fileName: string;
       groupId: string | null;
       taskId: string | null;
-      status: "PROCESSING" | "REJECTED" | "FAILED";
+      status: "QUEUED" | "REJECTED" | "FAILED";
       error: UploadError | null;
       logs: ProgressLog[];
     }> = [];
@@ -254,7 +260,8 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
       try {
         const task = await createReconciliationTask({
           batchId: state.id,
-          settlementFiles: unitDocuments.map((document) => toTaskUploadFile(document.file)),
+          batchDocumentIds: unit.documentIds,
+          settlementFiles: unitDocuments.map((document) => ({ file: document.file, deleteAfterRun: false })),
           agentSelector,
           settlementHint: {
             name: unit.shopNo ?? undefined,
@@ -263,29 +270,6 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
             documentLabels: unitDocuments.map((document) => document.fileName),
           },
           onProgress: (log) => logs.push(log),
-          onQueued: async ({ taskId }) => {
-            await markDocumentsTaskStarted(state.id, unit.documentIds, taskId);
-          },
-          onSettled: async (result) => {
-            const latest = readBatchState(state.id);
-            if (!latest) return;
-            const nextStatus = documentStatusFromTaskStatus(result.status);
-            const targets = unit.documentIds
-              .map((documentId) => latest.documents.find((item) => item.id === documentId))
-              .filter((document): document is BatchDocumentState => Boolean(document));
-            if (!targets.length) return;
-            const completedDetail = await getTaskDetail(result.taskId);
-            const isCombinedGroupTask = targets.length > 1;
-            for (const target of targets) {
-              applySettledTaskToDocument(target, result.taskId, nextStatus, completedDetail, result.message, { groupResult: isCombinedGroupTask });
-            }
-            await syncBatchState(latest, targets.map((target) => target.id));
-            if (isCombinedGroupTask) {
-              await approveResolvedSplitGroupReviews(latest, targets.map((target) => target.id));
-            } else {
-              await markUnresolvedSplitGroupReviews(latest, targets.map((target) => target.id));
-            }
-          },
         });
         items.push({
           fileName: unit.fileName,
@@ -326,6 +310,16 @@ batchesRouter.post("/:id/execute", async (req, res, next) => {
 
 const settledDocumentStatuses = new Set<BatchDocumentStatus>(["SUCCEEDED", "FAILED", "CANCELLED", "NEEDS_REVIEW"]);
 
+export function applyDocumentTaskQueued(
+  document: Pick<BatchDocumentState, "status" | "taskId" | "updatedAt">,
+  taskId: string,
+  now = new Date().toISOString(),
+) {
+  if (!settledDocumentStatuses.has(document.status)) document.status = "QUEUED";
+  document.taskId ??= taskId;
+  document.updatedAt = now;
+}
+
 export function applyDocumentTaskStarted(
   document: Pick<BatchDocumentState, "status" | "taskId" | "updatedAt">,
   taskId: string,
@@ -336,12 +330,21 @@ export function applyDocumentTaskStarted(
   document.updatedAt = now;
 }
 
+async function markDocumentsTaskQueued(batchId: string, documentIds: string[], taskId: string) {
+  const latest = readBatchState(batchId);
+  if (!latest) return;
+  const targets = latest.documents.filter((item) => documentIds.includes(item.id));
+  if (!targets.length) return;
+  for (const target of targets) applyDocumentTaskQueued(target, taskId);
+  await syncBatchState(latest, targets.map((target) => target.id));
+}
+
 export function applyDocumentTaskInterrupted(
   document: Pick<BatchDocumentState, "status" | "taskId" | "issues" | "updatedAt">,
   message: string,
   now = new Date().toISOString(),
 ) {
-  if (document.status !== "PROCESSING" || !document.taskId) return false;
+  if (!["QUEUED", "PROCESSING"].includes(document.status) || !document.taskId) return false;
   document.status = "READY";
   document.taskId = null;
   document.issues = uniqueTexts([...document.issues, message]);
@@ -358,17 +361,44 @@ async function markDocumentsTaskStarted(batchId: string, documentIds: string[], 
   await syncBatchState(latest, targets.map((target) => target.id));
 }
 
+async function settleBatchDocuments(params: { batchId: string; documentIds: string[]; taskId: string; status: string; message: string | null }) {
+  const latest = readBatchState(params.batchId);
+  if (!latest) return;
+  const nextStatus = documentStatusFromTaskStatus(params.status);
+  const targets = params.documentIds
+    .map((documentId) => latest.documents.find((item) => item.id === documentId))
+    .filter((document): document is BatchDocumentState => Boolean(document));
+  if (!targets.length) return;
+  const completedDetail = await getTaskDetail(params.taskId);
+  const isCombinedGroupTask = targets.length > 1;
+  for (const target of targets) {
+    applySettledTaskToDocument(target, params.taskId, nextStatus, completedDetail, params.message, { groupResult: isCombinedGroupTask });
+  }
+  await syncBatchState(latest, targets.map((target) => target.id));
+  if (isCombinedGroupTask) {
+    await approveResolvedSplitGroupReviews(latest, targets.map((target) => target.id));
+  } else {
+    await markUnresolvedSplitGroupReviews(latest, targets.map((target) => target.id));
+  }
+}
+
+registerBatchTaskLifecycle({
+  onQueued: ({ batchId, documentIds, taskId }) => markDocumentsTaskQueued(batchId, documentIds, taskId),
+  onStarted: ({ batchId, documentIds, taskId }) => markDocumentsTaskStarted(batchId, documentIds, taskId),
+  onSettled: settleBatchDocuments,
+});
+
 async function recoverInterruptedBatchDocuments(state: BatchState) {
   const changedIds: string[] = [];
   const processingTaskDocumentCounts = new Map<string, number>();
   for (const document of state.documents) {
-    if (document.status === "PROCESSING" && document.taskId) {
+    if (["QUEUED", "PROCESSING"].includes(document.status) && document.taskId) {
       processingTaskDocumentCounts.set(document.taskId, (processingTaskDocumentCounts.get(document.taskId) ?? 0) + 1);
     }
   }
   for (const document of state.documents) {
     const taskId = document.taskId;
-    if (document.status !== "PROCESSING" || !taskId || hasInFlightReconciliationTask(taskId)) continue;
+    if (!["QUEUED", "PROCESSING"].includes(document.status) || !taskId || hasInFlightReconciliationTask(taskId)) continue;
 
     const completedDetail = await getTaskDetail(taskId);
     const completedTask = completedDetail?.task;
@@ -385,8 +415,8 @@ async function recoverInterruptedBatchDocuments(state: BatchState) {
       continue;
     }
 
-    await failTaskRecord(taskId, state.id, "BATCH_TASK_INTERRUPTED: 后端服务重启或执行进程中断，内存队列丢失；已释放批量明细以便重新执行");
-    if (applyDocumentTaskInterrupted(document, "上一次执行因后端服务重启或进程中断未完成，已自动恢复为可重新执行")) {
+    await failTaskRecord(taskId, state.id, "BATCH_TASK_INTERRUPTED: 未找到持久化队列记录；已释放批量明细以便重新执行");
+    if (applyDocumentTaskInterrupted(document, "上一次执行未找到持久化队列记录，已自动恢复为可重新执行")) {
       changedIds.push(document.id);
     }
   }
@@ -428,7 +458,13 @@ function applySettledTaskToDocument(
   }
   document.status = status;
   document.taskId = taskId;
-  document.issues = settledDocumentIssues(document.issues, status, completedDetail?.reviewItems ?? [], failureMessage);
+  document.issues = settledDocumentIssues(
+    document.issues,
+    status,
+    completedDetail?.reviewItems ?? [],
+    failureMessage,
+    Boolean(completedTask && taskHasMissingErp(completedTask)),
+  );
   document.updatedAt = new Date().toISOString();
 }
 
@@ -447,7 +483,7 @@ async function approveResolvedSplitGroupReviews(state: BatchState, changedDocume
     const note = `同批同店同账期拆单合计已匹配：${group.shopNo} ${periodLabel}，${group.documentCount} 份结算单合计 ${group.settlementAmount?.toFixed(2)} 元，ERP 可比金额 ${group.erpSalesTotal?.toFixed(2)} 元，合计差额 ${group.differenceAmount?.toFixed(2)} 元；单张差额属于拆单范围差，不作为异常。`;
     const taskIds = uniqueTexts(group.documentIds
       .map((documentId) => state.documents.find((document) => document.id === documentId)?.taskId));
-    for (const taskId of taskIds) await approveTaskPendingReviews(taskId, note);
+    for (const taskId of taskIds) await addSystemMatchEvidenceToPendingReviews(taskId, note);
   }
 }
 
@@ -495,7 +531,7 @@ async function precheckSettlementFile(
   const fileName = stored.originalName;
   const issues: string[] = [];
   let status: BatchDocumentStatus = "READY";
-  const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
+  const sha256 = await sha256File(stored.absolutePath);
 
   const fileTypeError = validateBatchSettlementUpload(stored.originalName, file.mimetype);
   if (fileTypeError) {
@@ -560,6 +596,16 @@ async function precheckSettlementFile(
     status,
     issues,
   })];
+}
+
+function sha256File(filePath: string) {
+  return new Promise<string>((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.once("error", reject);
+    stream.once("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 async function completePrecheckDocument(params: {
@@ -670,14 +716,6 @@ export function validateBatchSettlementUpload(fileName: string, mimetype = "appl
   return null;
 }
 
-function toTaskUploadFile(file: BatchDocumentState["file"]) {
-  return {
-    buffer: fs.readFileSync(file.absolutePath),
-    originalName: file.originalName,
-    contentType: file.contentType,
-  };
-}
-
 function documentStatusFromTaskStatus(status: string): BatchDocumentStatus {
   if (status === "SUCCEEDED") return "SUCCEEDED";
   if (status === "FAILED") return "FAILED";
@@ -757,6 +795,7 @@ export function settledDocumentIssues(
   status: BatchDocumentStatus,
   reviewItems: Pick<StoredReviewItem, "title" | "message" | "differenceAmount" | "suggestion">[] = [],
   failureMessage: string | null = null,
+  suppressDifference = false,
 ) {
   const retained = existingIssues.filter((issue) => !readinessIssuePattern.test(issue));
   if (status === "SUCCEEDED") return [];
@@ -768,7 +807,7 @@ export function settledDocumentIssues(
     const title = item.title?.trim();
     const message = item.message?.trim();
     if (!message) return "";
-    const amount = Number.isFinite(item.differenceAmount ?? NaN) ? `（差额 ${Number(item.differenceAmount).toFixed(2)}）` : "";
+    const amount = !suppressDifference && Number.isFinite(item.differenceAmount ?? NaN) ? `（差额 ${Number(item.differenceAmount).toFixed(2)}）` : "";
     return title ? `${title}${amount}：${message}` : `${message}${amount}`;
   }).filter(Boolean);
   return reviewMessages.length ? uniqueTexts(reviewMessages) : uniqueTexts([...retained, failureMessage ?? "任务需要人工复核"]);

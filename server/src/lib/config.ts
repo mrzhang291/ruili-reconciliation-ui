@@ -48,15 +48,24 @@ export const config = {
     requestTimeoutMs: intFromEnv("CHERRYSTUDIO_REQUEST_TIMEOUT_MS", 20 * 60 * 1000),
   },
   reconciliation: {
-    maxConcurrentTasks: Math.max(1, intFromEnv("RECONCILIATION_MAX_CONCURRENT_TASKS", 1)),
+    maxConcurrentTasks: Math.max(1, intFromEnv("RECONCILIATION_MAX_CONCURRENT_TASKS", 2)),
+    queueFile: process.env.RECONCILIATION_QUEUE_FILE || "../.runtime/reconciliation-queue.json",
+  },
+  qqMail: {
+    // QQ SMTP 的服务器参数固定，避免把邮件投递到未经确认的主机。
+    host: "smtp.qq.com",
+    port: 465,
+    secure: true,
+    credentialTarget: process.env.QQ_MAIL_CREDENTIAL_TARGET || "BillCompare.QQMail.SMTP",
+    timeoutMs: Math.max(5_000, intFromEnv("QQ_MAIL_TIMEOUT_MS", 20_000)),
   },
   lark: {
     profile: "aad27213",
-    baseToken: process.env.LARK_BASE_TOKEN || "PgrCbbHxyaHtQLsNa8ac1gnLn2f",
-    knowledgeTableId: process.env.LARK_KNOWLEDGE_TABLE_ID || "tbliMWw8XUfbWmuX",
-    taskTableId: process.env.LARK_TASK_TABLE_ID || "tblrpKbGxi38PnIU",
-    reviewTableId: process.env.LARK_REVIEW_TABLE_ID || "tblrlpUs9nlY0dCW",
-    erpTableId: process.env.LARK_ERP_TABLE_ID || "tblx7K2MXNLintEO",
+    baseToken: process.env.LARK_BASE_TOKEN || "",
+    knowledgeTableId: process.env.LARK_KNOWLEDGE_TABLE_ID || "",
+    taskTableId: process.env.LARK_TASK_TABLE_ID || "",
+    reviewTableId: process.env.LARK_REVIEW_TABLE_ID || "",
+    erpTableId: process.env.LARK_ERP_TABLE_ID || "",
   },
   maxUploadBytes: 20 * 1024 * 1024, // 20 MB
 };
@@ -67,4 +76,8 @@ export function resolveUploadDir() {
 
 export function resolveTaskWorkRoot() {
   return path.resolve(SERVER_ROOT, config.taskWorkDir);
+}
+
+export function resolveReconciliationQueuePath() {
+  return path.resolve(SERVER_ROOT, config.reconciliation.queueFile);
 }
