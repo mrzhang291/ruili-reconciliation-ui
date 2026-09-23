@@ -1,5 +1,5 @@
 import { ReconciliationApiError } from "./error";
-import type { ReconciliationApi } from "./types";
+import type { ReconciliationApi, ReviewExportFilters } from "./types";
 import type {
   BatchPrecheckResult,
   BatchReconciliationTaskCreateResult,
@@ -20,6 +20,7 @@ import type {
   PrecheckBatchInput,
   ReconciliationProcessLog,
   ReconciliationReviewRow,
+  ReconciliationReviewWorklistRow,
   ReconciliationReviewItem,
   ReconciliationStatistics,
   ReconciliationTaskDetail,
@@ -32,6 +33,14 @@ import type {
 
 type HttpConfig = {
   baseUrl: string;
+};
+
+type ErrorEnvelope = {
+  error?: {
+    code?: string;
+    message?: string;
+    requestId?: string;
+  };
 };
 
 const startupRetryDelaysMs = [250, 500, 1_000, 1_500, 2_000];
@@ -130,6 +139,18 @@ type RawReviewListResponse = {
   hasMore: boolean;
 };
 
+type RawReviewWorklistRow = RawReviewListRow & {
+  classification: ReconciliationReviewWorklistRow["classification"];
+  priority: ReconciliationReviewWorklistRow["priority"];
+  confirmation: ReconciliationReviewWorklistRow["confirmation"];
+  evidence: ReconciliationReviewWorklistRow["evidence"];
+  candidateRule: ReconciliationReviewWorklistRow["candidateRule"];
+};
+
+type RawReviewWorklistResponse = {
+  items: RawReviewWorklistRow[];
+};
+
 type RawListResponse = {
   items: RawSummary[];
   page: number;
@@ -223,6 +244,17 @@ function toReviewRow(raw: RawReviewListRow): ReconciliationReviewRow {
       suggestion: raw.item.suggestion,
       status: raw.item.status as ReconciliationReviewItem["status"],
     },
+  };
+}
+
+function toReviewWorklistRow(raw: RawReviewWorklistRow): ReconciliationReviewWorklistRow {
+  return {
+    ...toReviewRow(raw),
+    classification: raw.classification,
+    priority: raw.priority,
+    confirmation: raw.confirmation,
+    evidence: raw.evidence,
+    candidateRule: raw.candidateRule,
   };
 }
 
@@ -388,11 +420,11 @@ export class HttpReconciliationApi implements ReconciliationApi {
     this.invalidateCache(["tasks:", "stats:", "reviews:"]);
 
     // 需要返回 ReconciliationTaskSummary，但异步对账还没完成。
-    // 这里返回一个 PROCESSING 的占位摘要，后续靠轮询 getTask 获取真实状态。
+    // 排队任务必须保持 QUEUED，避免前端将等待时间误判为执行超时。
     const placeholder: ReconciliationTaskSummary = {
       id: taskId,
       name: null,
-      status: "PROCESSING",
+      status: envelope?.data?.status === "QUEUED" ? "QUEUED" : "PROCESSING",
       periodLabel: null,
       settlementFile: {
         id: "pending",
@@ -455,7 +487,7 @@ export class HttpReconciliationApi implements ReconciliationApi {
     }
 
     if (!response.ok) {
-      const errorPayload = payload as { error?: { code?: string; message?: string; requestId?: string } } | null;
+      const errorPayload = payload as ErrorEnvelope | null;
       throw new ReconciliationApiError(
         errorPayload?.error?.message ?? `批量预检失败（HTTP ${response.status}）`,
         errorPayload?.error?.code ?? "BATCH_PRECHECK_FAILED",
@@ -586,6 +618,47 @@ export class HttpReconciliationApi implements ReconciliationApi {
     const link = document.createElement("a");
     link.href = url;
     link.download = `${batchId}-batch-export.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async exportReviewCsv(filters: ReviewExportFilters = {}): Promise<void> {
+    const query = new URLSearchParams();
+    if (filters.region) query.set("region", filters.region);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.differenceMin !== undefined) query.set("differenceMin", String(filters.differenceMin));
+    if (filters.differenceMax !== undefined) query.set("differenceMax", String(filters.differenceMax));
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/tasks/review-items/export?${query.toString()}`, {
+        cache: "no-store",
+        headers: { Accept: "text/csv, application/json" },
+      });
+    } catch {
+      throw new ReconciliationApiError("暂时无法连接对账后端", "NETWORK_ERROR");
+    }
+    if (!response.ok) {
+      let errorPayload: ErrorEnvelope | null = null;
+      try {
+        const responseText = await response.text();
+        errorPayload = responseText ? JSON.parse(responseText) as ErrorEnvelope : null;
+      } catch {
+        // The export endpoint may be behind a proxy that returns a non-JSON error page.
+      }
+      throw new ReconciliationApiError(
+        errorPayload?.error?.message ?? `导出失败（HTTP ${response.status}）`,
+        errorPayload?.error?.code ?? "REVIEW_EXPORT_FAILED",
+        errorPayload?.error?.requestId,
+        response.status,
+      );
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    const regionPrefix = filters.region === "OTHER" ? "其他" : filters.region;
+    const statusPrefix = filters.status === "PENDING" ? "待确认-" : filters.status === "IGNORED" ? "已暂不处理-" : filters.status === "APPROVED" ? "已确认-" : "";
+    link.download = `${regionPrefix ? `${regionPrefix}-` : ""}${statusPrefix}差异明细报表-${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -721,6 +794,13 @@ export class HttpReconciliationApi implements ReconciliationApi {
       }
       return rows;
     });
+  }
+
+  async listReviewWorklist(): Promise<ReconciliationReviewWorklistRow[]> {
+    // This view includes cross-item candidate-rule counts. Do not reuse a cached or
+    // in-flight response here: a status update can change badges on other rows.
+    const raw = await this.request<RawReviewWorklistResponse>("/api/tasks/review-items/worklist", { cache: "no-store" });
+    return raw.items.map(toReviewWorklistRow);
   }
 
   async getTask(taskId: string): Promise<ReconciliationTaskDetail> {

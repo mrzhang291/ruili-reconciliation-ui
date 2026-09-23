@@ -181,6 +181,29 @@ function taskFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredTask {
   };
 }
 
+export function taskHasMissingErp(task: Pick<StoredTask, "rawAgentJson">) {
+  if (!task.rawAgentJson) return false;
+  try {
+    const payload = JSON.parse(task.rawAgentJson) as Record<string, unknown>;
+    if (payload.missingErp === true) return true;
+    const missingAmounts = payload.salesTotal === null
+      && payload.netSalesTotal === null
+      && payload.erpAmount === null
+      && payload.difference === null;
+    const evidence = `${String(payload.basisReason ?? "")} ${String(payload.issues ?? "")}`;
+    return missingAmounts && /ERP|DRP/i.test(evidence) && /未找到|缺失|无匹配|没有匹配|not\s*found/i.test(evidence);
+  } catch {
+    return false;
+  }
+}
+
+export function comparableDifferenceAmount(task: Pick<StoredTask, "rawAgentJson" | "erpAmount" | "differenceAmount">) {
+  // Old records can lack the explicit missingErp flag.  An absent ERP amount is
+  // never a comparable amount, even if a legacy row contains a synthetic gap.
+  if (typeof task.erpAmount !== "number" || !Number.isFinite(task.erpAmount)) return null;
+  return taskHasMissingErp(task) ? null : task.differenceAmount;
+}
+
 function reviewFromRow(row: ReturnType<typeof rowsFromPage>[number]): StoredReviewItem {
   const value = row.values;
   return {
@@ -204,6 +227,26 @@ async function recordGet(tableId: string, recordId: string, fields: readonly str
   const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", tableId, "--record-id", recordId, "--format", "json", "--as", "user"];
   for (const field of fields) args.push("--field-id", field);
   return rowsFromPage(await runLarkCli<PageEnvelope>(args))[0] ?? null;
+}
+
+const recordGetMaxIds = 200;
+
+export function recordIdBatches(recordIds: string[]) {
+  const ids = [...new Set(recordIds.filter(isLarkRecordId))];
+  return Array.from({ length: Math.ceil(ids.length / recordGetMaxIds) }, (_, index) =>
+    ids.slice(index * recordGetMaxIds, (index + 1) * recordGetMaxIds),
+  );
+}
+
+async function recordGetMany(tableId: string, recordIds: string[], fields: readonly string[]) {
+  const rows: Array<ReturnType<typeof rowsFromPage>[number]> = [];
+  for (const ids of recordIdBatches(recordIds)) {
+    const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", tableId, "--format", "json", "--as", "user"];
+    for (const id of ids) args.push("--record-id", id);
+    for (const field of fields) args.push("--field-id", field);
+    rows.push(...rowsFromPage(await runLarkCli<PageEnvelope>(args)));
+  }
+  return rows;
 }
 
 export function findCreatedRecordId(payload: unknown) {
@@ -323,20 +366,11 @@ export async function getTaskRecord(recordId: string) {
 }
 
 export async function getTaskRecords(recordIds: string[]) {
-  const ids = [...new Set(recordIds.filter(isLarkRecordId))];
-  if (!ids.length) return [];
-  const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", config.lark.taskTableId, "--format", "json", "--as", "user"];
-  for (const id of ids) args.push("--record-id", id);
-  for (const field of taskFields) args.push("--field-id", field);
-  return rowsFromPage(await runLarkCli<PageEnvelope>(args)).map(taskFromRow);
+  return (await recordGetMany(config.lark.taskTableId, recordIds, taskFields)).map(taskFromRow);
 }
 
 export async function getReviewRecords(recordIds: string[]) {
-  if (!recordIds.length) return [];
-  const args = ["base", "+record-get", "--base-token", config.lark.baseToken, "--table-id", config.lark.reviewTableId, "--format", "json", "--as", "user"];
-  for (const id of recordIds) args.push("--record-id", id);
-  for (const field of reviewFields) args.push("--field-id", field);
-  return rowsFromPage(await runLarkCli<PageEnvelope>(args)).map(reviewFromRow);
+  return (await recordGetMany(config.lark.reviewTableId, recordIds, reviewFields)).map(reviewFromRow);
 }
 
 function reviewListFilter(params: { statuses: string[]; taskId?: string }) {
@@ -356,21 +390,22 @@ async function reviewListPage(params: { offset: number; limit: number; statuses:
   return runLarkCli<PageEnvelope>(args);
 }
 
-export async function listReviewRecords(params: { page: number; pageSize: number; statuses: string[]; taskId?: string }) {
+export async function listReviewRecords(params: { page: number; pageSize: number; statuses: string[]; taskId?: string; fresh?: boolean }) {
   const key = cacheKey("reviews:list", {
     page: params.page,
     pageSize: params.pageSize,
     statuses: [...params.statuses].sort(),
     taskId: params.taskId ?? "",
   });
-  return readThroughCache(key, reviewListCacheTtlMs, async () => {
+  const load = async () => {
     const offset = (params.page - 1) * params.pageSize;
     const page = await reviewListPage({ offset, limit: params.pageSize, statuses: params.statuses, taskId: params.taskId });
     return {
       items: rowsFromPage(page).map(reviewFromRow),
       hasMore: Boolean(page.data?.has_more),
     };
-  });
+  };
+  return params.fresh ? load() : readThroughCache(key, reviewListCacheTtlMs, load);
 }
 
 async function listTaskReviewRecords(task: StoredTask) {
@@ -540,6 +575,23 @@ export async function applyTaskResult(recordId: string, batchId: string, result:
     Agent原始JSON: JSON.stringify(result.rawAgentPayload),
   });
 
+  if (result.missingErp) {
+    const verified = await getTaskRecord(recordId);
+    if (!verified || verified.status !== "PROCESSING" || verified.batchId !== batchId) return false;
+    const actionableIssues = uniqueActionableIssues(result.issues);
+    await updateTaskRecord(recordId, {
+      状态: "待审核",
+      完成时间: formatDateTime(new Date()),
+      失败原因: null,
+    });
+    const completed = await getTaskRecord(recordId);
+    if (completed) {
+      await createReviewRecords(completed, actionableIssues);
+      await obsoleteSupersededTaskRecords(completed);
+    }
+    return true;
+  }
+
   let verified: StoredTask | null = null;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     verified = await getTaskRecord(recordId);
@@ -594,7 +646,7 @@ export function uniqueActionableIssues(issues: CherryIssue[]) {
 
 export async function failTaskRecord(recordId: string, batchId: string, message: string) {
   const current = await getTaskRecord(recordId);
-  if (!current || current.status !== "PROCESSING" || current.batchId !== batchId) return;
+  if (!current || !["QUEUED", "PROCESSING"].includes(current.status) || current.batchId !== batchId) return;
   await updateTaskRecord(recordId, { 状态: "失败", 失败原因: message, 完成时间: formatDateTime(new Date()) });
 }
 
@@ -643,27 +695,35 @@ export async function updateReviewRecord(taskId: string, itemId: string, status:
   return true;
 }
 
-export async function approveTaskPendingReviews(taskId: string, note: string) {
+const systemMatchSuggestion = "系统已记录同批合计匹配证据；该结果仅作为核实依据，仍需收到确认后才能结案。";
+
+export function systemMatchEvidenceFields(
+  review: Pick<StoredReviewItem, "message" | "suggestion">,
+  task: Pick<StoredTask, "rawAgentJson" | "erpAmount" | "differenceAmount">,
+  note: string,
+) {
+  return {
+    差异金额: comparableDifferenceAmount(task),
+    差异描述: appendReviewMessage(review.message, note),
+    处理建议: appendReviewMessage(review.suggestion ?? "", systemMatchSuggestion),
+  };
+}
+
+export async function addSystemMatchEvidenceToPendingReviews(taskId: string, note: string) {
   const task = await getTaskRecord(taskId);
   if (!task) return false;
   const reviews = await listTaskReviewRecords(task);
   const pendingReviews = reviews.filter((review) => review.status === "PENDING");
   if (!pendingReviews.length) return false;
 
-  const now = formatDateTime(new Date());
   for (const review of pendingReviews) {
-    await recordUpsert(config.lark.reviewTableId, {
-      审核结果: "已通过",
-      审核备注: note,
-      审核时间: now,
-    }, review.id);
+    await recordUpsert(config.lark.reviewTableId, systemMatchEvidenceFields(review, task, note), review.id);
   }
   invalidateReviewReadCaches();
-  if (task.status === "NEEDS_REVIEW") await updateTaskRecord(taskId, { 状态: "已审核" });
   return true;
 }
 
-const scopeMismatchSuggestion = "不要按 ERP 全店汇总或不可比口径差额直接定责；请补充 ERP 合同/专柜/铺位/活动范围键，或核对结算单扣点、其他扣率、变扣和费用扣减后再按同范围复核。";
+const scopeMismatchSuggestion = "差异金额仅用于定位，当前扣点或范围未对齐，不能直接判定销售额不一致；请补充 ERP 合同/专柜/铺位/活动范围键后按同范围复核。";
 
 function appendReviewMessage(message: string, note: string) {
   if (!message) return note;
@@ -693,7 +753,7 @@ export async function markTaskPendingReviewsScopeMismatch(taskId: string, note: 
 
   for (const review of pendingReviews) {
     await recordUpsert(config.lark.reviewTableId, {
-      差异金额: null,
+      差异金额: comparableDifferenceAmount(task),
       差异描述: appendReviewMessage(review.message, note),
       处理建议: scopeMismatchSuggestion,
     }, review.id);
@@ -794,7 +854,7 @@ export async function getTaskStatistics(month: string) {
       processingTasks: count("PROCESSING") + count("QUEUED"),
       autoMatchRate: current.length ? count("SUCCEEDED") / current.length : 0,
       monthOverMonthRate: previousTotal ? (current.length - previousTotal) / previousTotal : 0,
-      totalDifferenceAmount: current.reduce((sum, task) => sum + Math.abs(task.differenceAmount ?? 0), 0).toFixed(2),
+      totalDifferenceAmount: current.reduce((sum, task) => sum + Math.abs(comparableDifferenceAmount(task) ?? 0), 0).toFixed(2),
       trend,
       updatedAt: new Date().toISOString(),
     };

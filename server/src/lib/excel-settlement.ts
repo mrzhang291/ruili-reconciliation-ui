@@ -143,8 +143,11 @@ export async function readExcelSettlementDocuments(filePath: string, fileName: s
 }
 
 export function chooseExcelSettlementCandidate(candidates: ExcelSettlementCandidate[]) {
+  const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority));
+  if (!Number.isFinite(highestPriority)) return null;
+  const preferred = candidates.filter((candidate) => candidate.priority === highestPriority);
   const byAmount = new Map<number, ExcelSettlementCandidate[]>();
-  for (const candidate of candidates) {
+  for (const candidate of preferred) {
     const cents = toCents(candidate.amount);
     byAmount.set(cents, [...(byAmount.get(cents) ?? []), candidate]);
   }
@@ -345,7 +348,8 @@ function uniqueNumbers(values: number[]) {
 function labelPriority(label: string) {
   const value = cleanLabel(label);
   if (!value || /(数量|单号|日期|合同|税号|银行|账户|地址|供应商|品牌|佣金|手续费|费用|费率|扣点|预付款)/.test(value)) return 0;
-  if (/(已确认结算单净营业额|结算单净营业额|结算净营业额|净营业额|本月结算营业额小计)/.test(value)) return 30;
+  if (/(本月结算营业额小计|结算营业额小计)/.test(value)) return 40;
+  if (/(已确认结算单净营业额|结算单净营业额|结算净营业额|净营业额)/.test(value)) return 30;
   return 0;
 }
 

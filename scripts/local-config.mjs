@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const CREDENTIALS_PATH = path.join(ROOT, ".runtime", "config", "credentials.json");
 const credentialNames = ["cherryApiKey"];
-const KEYCHAIN_SERVICE = "com.ruili.reconciliation";
+const KEYCHAIN_SERVICE = "com.reconciliation.workspace";
 
 function runDpapi(mode, value) {
   if (process.platform !== "win32") throw new Error("本机凭据加密目前仅支持 Windows");

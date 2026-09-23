@@ -1,10 +1,11 @@
-// 文件说明：应用主壳，负责在开始对账、对账总览、差异处理三个页面之间切换。
+// 文件说明：应用主壳，负责在开始对账、对账总览、差异处理和邮箱页面之间切换。
 // 对账任务执行与处理日志由 ReconciliationTaskProvider 常驻管理，切换页面不丢失。
 import { useCallback, useEffect, useState } from "react";
 import { AppSidebar } from "../features/reconciliation/components/AppSidebar";
 import { AppTopbar } from "../features/reconciliation/components/AppTopbar";
 import { BatchReconciliationView } from "../features/reconciliation/components/BatchReconciliationView";
 import { OverviewView } from "../features/reconciliation/components/OverviewView";
+import { MailboxView } from "../features/reconciliation/components/MailboxView";
 import { ReviewView } from "../features/reconciliation/components/ReviewView";
 import { StartView } from "../features/reconciliation/components/StartView";
 import { ConnectionSettingsView } from "../features/reconciliation/components/ConnectionSettingsView";
@@ -33,6 +34,7 @@ function AppShell({
         {view === "batch" && <BatchReconciliationView />}
         {view === "overview" && <OverviewView />}
         {view === "review" && <ReviewView />}
+        {view === "mail" && <MailboxView />}
         {view === "erp" && <ErpDetailsView onDirtyChange={onErpDirtyChange} />}
         {view === "erpImport" && <ErpImportView />}
         {view === "settings" && <ConnectionSettingsView />}

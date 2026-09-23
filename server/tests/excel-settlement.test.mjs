@@ -48,7 +48,7 @@ test("extracts settlement period without treating amounts as YYYYMM", () => {
   assert.equal(extractPeriodFromFileName("WHAD30 -5月结算单2.pdf"), `${currentYear}-05`);
 });
 
-test("chooses only a unique net settlement amount without ERP proximity", () => {
+test("prefers an explicit sales subtotal over a net-revenue component", () => {
   const candidates = extractSettlementCandidates([
     ["销售金额", "2001043.00"],
     ["结算净营业额", "1677854.64"],
@@ -59,11 +59,13 @@ test("chooses only a unique net settlement amount without ERP proximity", () => 
   assert.equal(chosen?.label, "结算净营业额");
   assert.equal(chosen?.amount, 1677854.64);
 
-  const ambiguous = extractSettlementCandidates([
+  const subtotal = extractSettlementCandidates([
     ["结算净营业额", "100.00"],
     ["本月结算营业额小计", "200.00"],
   ]);
-  assert.equal(chooseExcelSettlementCandidate(ambiguous), null);
+  const subtotalChosen = chooseExcelSettlementCandidate(subtotal);
+  assert.equal(subtotalChosen?.label, "本月结算营业额小计");
+  assert.equal(subtotalChosen?.amount, 200);
 });
 
 test("builds a settlement extraction result from a chosen Excel candidate", () => {

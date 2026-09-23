@@ -1,5 +1,6 @@
 {
-  "name": "ruili-reconciliation-server",
+  "name": "reconciliation-service",
+  "description": "Local service for evidence-driven reconciliation workflows.",
   "version": "0.1.0",
   "private": true,
   "type": "module",

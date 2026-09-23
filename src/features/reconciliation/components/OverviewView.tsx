@@ -79,7 +79,7 @@ export function OverviewView() {
 
         <div className="filter-tabs" role="tablist" aria-label="按状态筛选">
           {([
-            ["all", "全部", counts.all], ["success", "成功", counts.success], ["issue", "待审核", counts.issue],
+            ["all", "全部", counts.all], ["success", "成功", counts.success], ["issue", "待确认", counts.issue],
             ["failed", "失败", counts.failed], ["processing", "进行中", counts.processing],
             ["cancelled", "已停止", counts.cancelled],
           ] as const).map(([value, label, count]) => (
@@ -133,7 +133,7 @@ export function OverviewView() {
                         disabled={record.status === "processing" || deletingTaskId === record.id}
                         onClick={(event) => {
                           event.stopPropagation();
-                          const confirmed = window.confirm("确定永久删除这条对账任务吗？相关审核数据和飞书附件也会一并删除，此操作无法撤销。");
+                            const confirmed = window.confirm("确定永久删除这条对账任务吗？相关待确认事项和飞书附件也会一并删除，此操作无法撤销。");
                           if (confirmed) void deleteTask(record.id);
                         }}
                       >{deletingTaskId === record.id ? "…" : "×"}</button>

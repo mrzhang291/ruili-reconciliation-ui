@@ -100,7 +100,7 @@ export function larkCliInvocation(args = []) {
 }
 
 export function testLark(settings = loadSettings()) {
-  const token = settings.values.LARK_BASE_TOKEN || "PgrCbbHxyaHtQLsNa8ac1gnLn2f";
+  const token = settings.values.LARK_BASE_TOKEN || "";
   const invocation = larkCliInvocation([
     "--profile", LARK_PROFILE, "base", "+base-get", "--base-token", token, "--as", "user", "--format", "json",
   ]);
@@ -127,6 +127,19 @@ export function portOpen(port, host = "127.0.0.1") {
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+// taskkill returns before Windows has always released the listening socket.  Wait
+// for that release before deciding whether a replacement service is necessary.
+export async function waitForPortClosed(port, { timeoutMs = 8_000, intervalMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (await portOpen(port)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(intervalMs, remaining));
+  }
+  return true;
+}
+
 function findWindowsPidsByPort(port) {
   try {
     const output = execFileSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
@@ -152,6 +165,13 @@ function stopPort(port) {
     } catch {
       // 进程可能已退出。
     }
+  }
+}
+
+async function restartPort(port) {
+  stopPort(port);
+  if (!(await waitForPortClosed(port))) {
+    throw new Error(`端口 ${port} 未在重启等待时间内释放，请关闭占用该端口的进程后重试`);
   }
 }
 
@@ -209,7 +229,7 @@ export async function ensureBackend(settings, cherryApiKey) {
   if (!cherryApiKey) return false;
   if (RESTART) {
     stopStaleBackendProcesses();
-    stopPort(settings.backendPort);
+    await restartPort(settings.backendPort);
   }
   if (await portOpen(settings.backendPort)) return backendHealthy(settings.backendPort);
   const logPath = runtimeLog("backend.log");
@@ -234,7 +254,7 @@ async function ensureConfigServer() {
 
 async function ensureFrontend() {
   runNpm(["run", "build"], ROOT);
-  if (RESTART) stopPort(FRONTEND_PORT);
+  if (RESTART) await restartPort(FRONTEND_PORT);
   if (await portOpen(FRONTEND_PORT)) return;
   const logPath = runtimeLog("frontend.log");
   spawnBackground(process.execPath, [path.join(ROOT, "node_modules", "vite", "bin", "vite.js"), "preview", "--host", "127.0.0.1", "--port", String(FRONTEND_PORT)], { cwd: ROOT, env: process.env }, logPath);
@@ -252,7 +272,7 @@ function openBrowser() {
 }
 
 async function main() {
-  log("===== 锐力对账系统一键启动 =====");
+  log("===== 智能对账工作台一键启动 =====");
   ensureLocalEnvFiles();
   ensureDependencies();
   assertPrerequisites();

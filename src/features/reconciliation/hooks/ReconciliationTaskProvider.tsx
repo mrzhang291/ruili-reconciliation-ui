@@ -281,7 +281,7 @@ export function ReconciliationTaskProvider({ onComplete, children }: Reconciliat
         appendLog("error", message);
         setError(message);
       } else if (needsReview.length) {
-        appendLog("success", `批量对账完成，${needsReview.length} 个任务待审核`);
+        appendLog("success", `批量对账完成，${needsReview.length} 个任务待确认`);
       } else if (blockedCount) {
         setError(`${blockedCount} 个文件未创建任务，其他任务已完成`);
       } else {

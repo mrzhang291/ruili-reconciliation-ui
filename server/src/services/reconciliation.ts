@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { deleteStoredFilePath, saveUploadedFile, type StoredFile } from "../lib/file-storage.js";
 import { config } from "../lib/config.js";
@@ -22,6 +23,15 @@ import {
   startTaskRecord,
   uploadTaskAttachment,
 } from "../lib/lark-store.js";
+import {
+  claimNextPersistedReconciliationRun,
+  enqueuePersistedReconciliationRun,
+  findPersistedReconciliationRun,
+  recoverPersistedReconciliationRuns,
+  removePersistedReconciliationRun,
+  type PersistedReconciliationRun,
+  type QueuedSettlementFile,
+} from "../lib/reconciliation-queue.js";
 
 export type ProgressLog = {
   id: string;
@@ -33,10 +43,11 @@ export type ProgressLog = {
 };
 
 export type CreateReconciliationInput = {
-  settlementFile?: { buffer: Buffer; originalName: string; contentType: string };
-  settlementFiles?: Array<{ buffer: Buffer; originalName: string; contentType: string }>;
+  settlementFile?: ReconciliationInputFile;
+  settlementFiles?: ReconciliationInputFile[];
   agentSelector: AgentSelector & { name: string };
   batchId?: string;
+  batchDocumentIds?: string[];
   settlementHint?: {
     name?: string;
     period?: string;
@@ -44,37 +55,72 @@ export type CreateReconciliationInput = {
     documentLabels?: string[];
   };
   onProgress?: (log: ProgressLog) => void;
-  onQueued?: (result: { taskId: string; status: "PROCESSING" }) => void | Promise<void>;
-  onSettled?: (result: { taskId: string; status: string; message: string | null }) => void | Promise<void>;
+};
+
+export type ReconciliationInputFile =
+  | { buffer: Buffer; originalName: string; contentType: string; deleteAfterRun?: boolean }
+  | { file: StoredFile; deleteAfterRun?: boolean };
+
+type TaskFiles = {
+  settlement: StoredFile;
+  settlements: Array<QueuedSettlementFile>;
+  settlementHint?: CreateReconciliationInput["settlementHint"];
 };
 
 type ActiveReconciliation = {
   controller: AbortController;
   target?: CherryAgentSession;
   batchId: string;
-  files: { settlement: StoredFile; settlements: StoredFile[]; settlementHint?: CreateReconciliationInput["settlementHint"] };
+  files: TaskFiles;
 };
 
 const activeReconciliations = new Map<string, ActiveReconciliation>();
 const maxConcurrentReconciliations = config.reconciliation.maxConcurrentTasks;
-const pendingReconciliationRuns: Array<{ taskId: string; run: () => Promise<void> }> = [];
 const queuedReconciliationTaskIds = new Set<string>();
+const progressListeners = new Map<string, CreateReconciliationInput["onProgress"]>();
 let runningReconciliationCount = 0;
 
-function scheduleReconciliation(taskId: string, run: () => Promise<void>) {
+type BatchTaskLifecycle = {
+  onQueued?: (params: { batchId: string; documentIds: string[]; taskId: string }) => void | Promise<void>;
+  onStarted?: (params: { batchId: string; documentIds: string[]; taskId: string }) => void | Promise<void>;
+  onSettled?: (params: { batchId: string; documentIds: string[]; taskId: string; status: string; message: string | null }) => void | Promise<void>;
+};
+
+let batchTaskLifecycle: BatchTaskLifecycle | null = null;
+
+export function registerBatchTaskLifecycle(lifecycle: BatchTaskLifecycle) {
+  batchTaskLifecycle = lifecycle;
+}
+
+function notifyBatchTaskLifecycle(
+  event: keyof BatchTaskLifecycle,
+  item: Pick<PersistedReconciliationRun, "batchId" | "batchDocumentIds" | "taskId">,
+  result?: { status: string; message: string | null },
+) {
+  const documentIds = item.batchDocumentIds ?? [];
+  const callback = batchTaskLifecycle?.[event];
+  if (!documentIds.length || !callback) return Promise.resolve();
+  const payload = event === "onSettled"
+    ? { batchId: item.batchId, documentIds, taskId: item.taskId, status: result?.status ?? "FAILED", message: result?.message ?? null }
+    : { batchId: item.batchId, documentIds, taskId: item.taskId };
+  return Promise.resolve(callback(payload as never)).catch((error) => {
+    console.error(`[reconciliation] 同步批量任务 ${item.taskId} 状态失败`, error);
+  });
+}
+
+function scheduleReconciliation(taskId: string) {
   queuedReconciliationTaskIds.add(taskId);
-  pendingReconciliationRuns.push({ taskId, run });
   drainReconciliationQueue();
 }
 
 function drainReconciliationQueue() {
-  while (runningReconciliationCount < maxConcurrentReconciliations && pendingReconciliationRuns.length) {
-    const next = pendingReconciliationRuns.shift();
+  while (runningReconciliationCount < maxConcurrentReconciliations) {
+    const next = claimNextPersistedReconciliationRun();
     if (!next) return;
     runningReconciliationCount += 1;
     void (async () => {
       queuedReconciliationTaskIds.delete(next.taskId);
-      await next.run();
+      await runReconciliation(next);
     })().finally(() => {
       runningReconciliationCount -= 1;
       drainReconciliationQueue();
@@ -83,7 +129,19 @@ function drainReconciliationQueue() {
 }
 
 export function hasInFlightReconciliationTask(taskId: string) {
-  return queuedReconciliationTaskIds.has(taskId) || activeReconciliations.has(taskId);
+  // A batch poll can run after the durable enqueue and before scheduleReconciliation
+  // updates this process-local set. The persisted queue is the source of truth in
+  // that gap (and after a process restart), so do not label the task interrupted.
+  return queuedReconciliationTaskIds.has(taskId)
+    || activeReconciliations.has(taskId)
+    || Boolean(findPersistedReconciliationRun(taskId));
+}
+
+export function recoverPersistedReconciliationQueue() {
+  const items = recoverPersistedReconciliationRuns();
+  for (const item of items) queuedReconciliationTaskIds.add(item.taskId);
+  drainReconciliationQueue();
+  return items.length;
 }
 
 export function getActiveTaskFile(taskId: string, kind: "SETTLEMENT" | "ERP") {
@@ -107,6 +165,13 @@ function emit(
   });
 }
 
+function taskProgressEmitter(taskId: string): CreateReconciliationInput["onProgress"] {
+  return (log) => {
+    appendTaskProgress(taskId, log);
+    progressListeners.get(taskId)?.(log);
+  };
+}
+
 function settlementFileInputs(input: CreateReconciliationInput) {
   const files = input.settlementFiles?.length ? input.settlementFiles : input.settlementFile ? [input.settlementFile] : [];
   if (!files.length) throw new Error("至少需要一份结算资料");
@@ -114,12 +179,29 @@ function settlementFileInputs(input: CreateReconciliationInput) {
 }
 
 function saveTaskFiles(input: CreateReconciliationInput) {
-  const settlements = settlementFileInputs(input).map((file) => saveUploadedFile(file.buffer, file.originalName, file.contentType));
+  const settlements = settlementFileInputs(input).map((file) => {
+    if ("file" in file) return { file: file.file, deleteAfterRun: file.deleteAfterRun ?? false };
+    return {
+      file: saveUploadedFile(file.buffer, file.originalName, file.contentType),
+      deleteAfterRun: file.deleteAfterRun ?? true,
+    };
+  });
   return {
-    settlement: settlements[0],
+    settlement: settlements[0].file,
     settlements,
     settlementHint: input.settlementHint,
   };
+}
+
+function deleteOwnedSettlementFiles(files: TaskFiles) {
+  for (const settlement of files.settlements) {
+    if (settlement.deleteAfterRun) deleteStoredFilePath(settlement.file.absolutePath);
+  }
+}
+
+function taskFilesFromRun(run: PersistedReconciliationRun): TaskFiles | null {
+  const settlement = run.settlements[0]?.file;
+  return settlement ? { settlement, settlements: run.settlements, settlementHint: run.settlementHint } : null;
 }
 
 export async function createReconciliationTask(input: CreateReconciliationInput) {
@@ -140,33 +222,65 @@ export async function createReconciliationTask(input: CreateReconciliationInput)
       batchId,
     });
   } catch (error) {
-    for (const settlement of files.settlements) deleteStoredFilePath(settlement.absolutePath);
+    deleteOwnedSettlementFiles(files);
     throw error;
   }
 
   initializeTaskProgress(taskId, pendingLogs);
+  progressListeners.set(taskId, input.onProgress);
   emit(onProgress, "success", `飞书任务已创建（记录 ID：${taskId}）`);
-  emit(onProgress, "info", files.settlements.length > 1
-    ? `任务已进入解析队列，本任务包含 ${files.settlements.length} 份同组结算资料，将合并后一次对账`
-    : `任务已进入解析队列，最多同时处理 ${maxConcurrentReconciliations} 个对账任务`);
   try {
-    await input.onQueued?.({ taskId, status: "PROCESSING" });
+    emit(onProgress, "info", files.settlements.length > 1
+      ? `正在把 ${files.settlements.length} 份结算原始文件保存到飞书附件字段…`
+      : "正在把结算原始文件保存到飞书附件字段…");
+    for (const settlement of files.settlements) {
+      await uploadTaskAttachment(taskId, "结算文件", settlement.file.absolutePath);
+    }
+    emit(onProgress, "success", files.settlements.length > 1 ? "同组结算原始文件已保存到飞书" : "结算原始文件已保存到飞书");
+    const queued = enqueuePersistedReconciliationRun({
+      taskId,
+      batchId,
+      agentSelector: input.agentSelector,
+      settlementHint: files.settlementHint,
+      settlements: files.settlements,
+      batchDocumentIds: input.batchDocumentIds,
+    });
+    await notifyBatchTaskLifecycle("onQueued", queued);
+    emit(onProgress, "info", files.settlements.length > 1
+      ? `任务已进入持久化队列，本任务包含 ${files.settlements.length} 份同组结算资料，将合并后一次对账`
+      : `任务已进入持久化队列，最多同时处理 ${maxConcurrentReconciliations} 个对账任务`);
   } catch (error) {
-    console.error(`[reconciliation] 同步任务 ${taskId} 入队状态失败`, error);
-    emit(onProgress, "error", "同步批量任务入队状态失败，任务将继续执行");
+    const message = error instanceof Error ? error.message : "任务入队失败";
+    try {
+      await failTaskRecord(taskId, batchId, `QUEUE_PERSIST_FAILED: ${message}`);
+    } catch {
+      // 飞书回写失败时保留原始错误，避免把未持久化的任务放进内存队列。
+    }
+    progressListeners.delete(taskId);
+    deleteOwnedSettlementFiles(files);
+    throw error;
   }
-  scheduleReconciliation(taskId, () => runReconciliation(taskId, batchId, files, input.agentSelector, onProgress, input.onSettled));
-  return { id: taskId, status: "PROCESSING" as const };
+  scheduleReconciliation(taskId);
+  return { id: taskId, status: "QUEUED" as const };
 }
 
-async function runReconciliation(
-  taskId: string,
-  batchId: string,
-  files: ActiveReconciliation["files"],
-  agentSelector: AgentSelector,
-  onProgress?: CreateReconciliationInput["onProgress"],
-  onSettled?: CreateReconciliationInput["onSettled"],
-) {
+async function runReconciliation(run: PersistedReconciliationRun) {
+  const taskId = run.taskId;
+  const batchId = run.batchId;
+  const files = taskFilesFromRun(run);
+  if (!files || files.settlements.some((settlement) => !fs.existsSync(settlement.file.absolutePath))) {
+    const message = "持久化队列中的结算原件不存在，无法恢复执行";
+    try {
+      await failTaskRecord(taskId, batchId, `QUEUE_SOURCE_MISSING: ${message}`);
+    } catch {
+      // 任务状态仍会在下次恢复时再次检查，避免把不存在原件的任务交给 Agent。
+    }
+    await notifyBatchTaskLifecycle("onSettled", run, { status: "FAILED", message });
+    removePersistedReconciliationRun(taskId);
+    progressListeners.delete(taskId);
+    return;
+  }
+  const onProgress = taskProgressEmitter(taskId);
   const active: ActiveReconciliation = { controller: new AbortController(), batchId, files };
   activeReconciliations.set(taskId, active);
   let taskWorkDir = "";
@@ -174,11 +288,8 @@ async function runReconciliation(
   const settle = async (status: string, message: string | null) => {
     if (settled) return;
     settled = true;
-    try {
-      await onSettled?.({ taskId, status, message });
-    } catch (error) {
-      console.error(`[reconciliation] 同步任务 ${taskId} 完成状态失败`, error);
-    }
+    await notifyBatchTaskLifecycle("onSettled", run, { status, message });
+    removePersistedReconciliationRun(taskId);
   };
 
   try {
@@ -187,14 +298,8 @@ async function runReconciliation(
       await settle(current?.status ?? "CANCELLED", current?.cancelReason ?? "对账任务未进入执行状态");
       return;
     }
+    await notifyBatchTaskLifecycle("onStarted", run);
     taskWorkDir = prepareTaskWorkDir(taskId);
-    emit(onProgress, "info", files.settlements.length > 1
-      ? `正在把 ${files.settlements.length} 份结算原始文件保存到飞书附件字段…`
-      : "正在把结算原始文件保存到飞书附件字段…");
-    for (const settlement of files.settlements) {
-      await uploadTaskAttachment(taskId, "结算文件", settlement.absolutePath);
-    }
-    emit(onProgress, "success", files.settlements.length > 1 ? "同组结算原始文件已保存到飞书" : "结算原始文件已保存到飞书");
 
     const current = await getTaskRecord(taskId);
     if (!current || current.status !== "PROCESSING" || current.batchId !== batchId) return;
@@ -205,15 +310,15 @@ async function runReconciliation(
 
     const result = await extractSettlementWithAgent({
       active,
-      agentSelector,
+      agentSelector: run.agentSelector,
       knowledgeInstructions: knowledge.instructions,
       onProgress,
       settlementFileUrl: `http://127.0.0.1:${config.port}/api/tasks/${taskId}/files/SETTLEMENT`,
       settlementFilePath: files.settlement.absolutePath,
       settlementFileName: files.settlement.originalName,
       settlementFiles: files.settlements.map((settlement) => ({
-        path: settlement.absolutePath,
-        name: settlement.originalName,
+        path: settlement.file.absolutePath,
+        name: settlement.file.originalName,
       })),
       settlementHint: files.settlementHint,
       submittedAt: new Date().toISOString(),
@@ -230,11 +335,21 @@ async function runReconciliation(
       }
       throw new Error("对账结果未能完成落库校验，任务状态异常或批次不匹配");
     }
-    emit(onProgress, "success", `对账完成：${result.name}，权威差额 ${result.difference.toFixed(2)} 元`);
+    emit(onProgress, "success", result.missingErp
+      ? `对账完成：${result.name}，ERP/DRP 未找到可比明细，已转待审核`
+      : `对账完成：${result.name}，权威差额 ${result.difference.toFixed(2)} 元`);
     const completed = await getTaskRecord(taskId);
     await settle(completed?.status ?? "FAILED", completed?.failureReason ?? null);
   } catch (error) {
-    if (active.controller.signal.aborted || (await getTaskRecord(taskId))?.status === "CANCELLED") {
+    let cancelled = active.controller.signal.aborted;
+    if (!cancelled) {
+      try {
+        cancelled = (await getTaskRecord(taskId))?.status === "CANCELLED";
+      } catch (statusError) {
+        console.error(`[reconciliation] 读取任务 ${taskId} 取消状态失败`, statusError);
+      }
+    }
+    if (cancelled) {
       await settle("CANCELLED", "对账任务已由用户停止");
       return;
     }
@@ -251,11 +366,12 @@ async function runReconciliation(
   } finally {
     try {
       cleanupTaskWorkDir(taskId);
-      for (const settlement of files.settlements) deleteStoredFilePath(settlement.absolutePath);
+      deleteOwnedSettlementFiles(files);
     } catch (error) {
       console.error(`[cleanup] 清理任务临时文件 ${taskId} 失败`, error);
     }
     if (activeReconciliations.get(taskId) === active) activeReconciliations.delete(taskId);
+    progressListeners.delete(taskId);
   }
 }
 
@@ -309,6 +425,7 @@ async function extractSettlementWithAgent(params: {
         }
       }
       params.active.target = undefined;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Agent 识别失败");
@@ -321,7 +438,7 @@ function buildReconciliationSessionInstructions(knowledgeInstructions: string) {
 当前项目由后端负责写入飞书 Base；Agent 不要写入钉钉或飞书，只负责读取结算单、调用 ERP/DRP MCP、返回最终 JSON。
 最终回复必须只包含一个合法 JSON 对象，不要 Markdown、标题、解释、工具过程、写入说明或额外字段。
 顶层必须且只能包含 settlementAmount、settlementAmountLabel、salesTotal、netSalesTotal、erpBasis、erpAmount、difference、matched、basisReason、issues、period、name 十二个字段。
-salesTotal 和 netSalesTotal 必须来自 ERP/DRP MCP；difference 必须等于 erpAmount - settlementAmount；issues 必须是字符串。`;
+salesTotal 和 netSalesTotal 必须来自 ERP/DRP MCP；difference 必须等于 erpAmount - settlementAmount；issues 必须是字符串。仅当 MCP 明确无匹配记录时，salesTotal、netSalesTotal、erpAmount、difference 可同时为 null，erpBasis 必须为 ambiguous、matched 必须为 false，系统会将其作为“ERP金额待核对”而非执行失败。`;
 }
 
 export async function cancelReconciliationTask(taskId: string) {
@@ -331,6 +448,17 @@ export async function cancelReconciliationTask(taskId: string) {
   await cancelTaskRecord(taskId, "对账任务已由用户停止");
 
   const active = activeReconciliations.get(taskId);
+  const queued = !active && queuedReconciliationTaskIds.has(taskId)
+    ? removePersistedReconciliationRun(taskId)
+    : null;
+  if (queued) {
+    queuedReconciliationTaskIds.delete(taskId);
+    for (const settlement of queued.settlements) {
+      if (settlement.deleteAfterRun) deleteStoredFilePath(settlement.file.absolutePath);
+    }
+    await notifyBatchTaskLifecycle("onSettled", queued, { status: "CANCELLED", message: "对账任务已由用户停止" });
+    progressListeners.delete(taskId);
+  }
   active?.controller.abort(new Error("对账任务已由用户停止"));
   appendTaskProgress(taskId, {
     id: crypto.randomUUID(), timestamp: new Date().toISOString(), level: "success", message: "对账任务已停止",
@@ -372,7 +500,7 @@ export function buildReconciliationPrompt(params: {
   const projectRoot = resolveProjectRootFromTaskWorkDir(params.taskWorkDir);
   const mineruScriptPath = path.join(projectRoot, ".claude", "my_script", "mineru_to_markdown.py");
   const shellProjectRoot = toSingleQuotedShellPath(projectRoot);
-  const mcpCommand = `cd ${shellProjectRoot} && { printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'; sleep 1; printf '%s\\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_store_period","arguments":{"mall_name":"<替换为name>","period":"<替换为period>"}}}'; sleep 2; } | RUILI_RECONCILIATION_API=http://127.0.0.1:${config.port} node scripts/erp-base-mcp.mjs`;
+  const mcpCommand = `cd ${shellProjectRoot} && { printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'; sleep 1; printf '%s\\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_store_period","arguments":{"mall_name":"<替换为name>","period":"<替换为period>"}}}'; sleep 2; } | RECONCILIATION_API=http://127.0.0.1:${config.port} node scripts/erp-base-mcp.mjs`;
   const hints = [
     params.settlementHint?.name ? `- 参考主体：${params.settlementHint.name}` : "",
     params.settlementHint?.period ? `- 参考账期：${params.settlementHint.period}` : "",
@@ -390,7 +518,7 @@ ${hints.length ? `以下信息只是前端或预检提供的参考，必须以�
 本次任务唯一允许使用的临时工作目录：
 ${params.taskWorkDir}
 
-如需下载文件、拆分 PDF、渲染图片、执行 OCR 或生成 Markdown/JSON，请只写入上述目录。不要在项目根目录、源码目录或输入文件旁创建文件；不要复制原始文件，优先直接读取以下本地路径：
+如需下载文件、拆分 PDF、渲染图片、执行 OCR 或生成 Markdown/JSON，请只写入上述目录。不要在项目根目录、源码目录或输入文件旁创建文件；不要复制原始文件，优先直接读取以下本地路径。文件路径必须从本提示逐字复制，不得手工重输、合并重复空格或改写文件名：
 ${settlementFileList}
 
 在过程中，面对图片、PDF 等文件，你可以使用 mineru 这个项目 Subagent 获取 Markdown 格式的内容。
@@ -401,17 +529,18 @@ ${settlementFileList}
 
 请按下面三步完成：
 1. 使用 MinerU 或视觉能力读取全部结算单，得到合并后的 A：主体、period、与 ERP/DRP 可比的结算金额字段、字段证据和疑点。
-2. 统一执行下方“本地 MCP JSON-RPC 命令”查询 ERP/DRP，入参必须是 {"mall_name":"从结算单确定的主体","period":"YYYY-MM"}，得到 B：sales_total、net_sales_total 和必要明细。sales_total 表示扣点前销售额，net_sales_total 表示扣点后金额。若参考主体存在，首次 MCP 查询优先使用参考主体；商场公司名、客户名、客户代码通常不是 ERP 店铺号，只有 MCP 能命中时才采用。MCP 没有匹配记录、非法月份、表头错误或工具失败时，不要把金额当成 0，也不要编造 B。
-3. 用结算单金额分别比较 sales_total 和 net_sales_total，根据结算单字段、店铺规则和业务证据判断本次应对扣点前还是扣点后；金额接近度只能在字段证据不清楚时作为兜底，不能覆盖明确字段口径。无法判断时 erpBasis 输出 ambiguous，并将 erpAmount 取两者中与结算金额差额绝对值更小的金额。difference 固定为 erpAmount - settlementAmount；差额绝对值超过 200 元必须在 issues 中说明。
+2. 统一执行下方“本地 MCP JSON-RPC 命令”查询 ERP/DRP，入参必须是 {"mall_name":"从结算单确定的主体","period":"YYYY-MM"}，得到 B：sales_total、net_sales_total 和必要明细。sales_total 表示扣点前销售额，net_sales_total 表示扣点后金额。若参考主体存在，首次 MCP 查询优先使用参考主体；商场公司名、客户名、客户代码通常不是 ERP 店铺号，只有 MCP 能命中时才采用。MCP 没有匹配记录、非法月份、表头错误或工具失败时，不要把金额当成 0，也不要编造 B；若明确无匹配记录，最终 JSON 中 salesTotal、netSalesTotal、erpAmount、difference 全部填 null，erpBasis 填 ambiguous、matched 填 false，并在 basisReason 和 issues 说明“ERP/DRP 未找到记录”。
+3. 本次默认核对“销售额”：先确定结算单的扣点前销售基数，再与 sales_total 比较；net_sales_total 只作扣点后金额的诊断证据。只有飞书知识规则明确指定该店需要按扣点后金额对账时，才可选 net_sales_total。金额接近度不能覆盖明确的字段口径。无法判断时 erpBasis 输出 ambiguous，并将 erpAmount 取两者中与结算金额差额绝对值更小的金额。difference 固定为 erpAmount - settlementAmount；差额绝对值超过 200 元必须在 issues 中说明。
 
-结算单字段如果写“实销金额”“实际销售”“本期实销”“销售收入”“销售金额”“销售额”“总销售额”“本月销售”“门店销售额”“营业额”等，通常表示扣点前销售口径；“应付销售额”仍然是销售额口径。商品折扣、促销折让后的实销仍不等于商场扣点/提成/分成后的净额，应优先对 sales_total。只有字段明确为“净营业额”“开票金额”“发票金额”“销售成本”“含税/不含税结账金额”“供应商应得”“应付金额/付款金额”“本期应结”“结算金额”等，且业务证据显示已扣除扣点/提成/分成后，才优先对 net_sales_total。
-商场结算单如果同时列出“本期销售/本期实销金额”和“扣率、提成、其他扣率、变扣额、合同变扣、赠券承担、会员折扣、支付手续费、仓储/物业/推广等扣减”，且下方还有“含税进价金额、含税/不含税结账金额、应付/开票金额”等扣后字段，不要机械选择“本期销售/本期实销金额”。必须先复核这些扣减后的可比金额是否更接近 ERP/DRP sales_total 或 net_sales_total；如果 ERP 金额明显更接近扣后/进价/结账字段，或 sales_total 与本期销售差额异常大且说明“结算单与 ERP 销售范围或数据口径明显不一致”，应在 issues 中标明范围/口径不可比，不要把该 full-shop 差额当成普通业务差额。
-如果结算单顶部或汇总区有“付款金额/销售金额/销售额”，同时下方有“营业额提成/销售提成/固定扣款”并得到“应开票金额/本期应付金额”，且顶部金额与 ERP/DRP sales_total 在 200 元内对平，应优先选择顶部销售/付款金额对 sales_total；不要选择扣后的应开票金额去对 net_sales_total 制造差额。
-结算单中的“实际应付”“实际付款”“本期应结款额”等最终付款金额，如果是在销售额/提成后金额基础上再扣除水电、物业、储值卡、会员、广告、公摊、账扣费用或现金扣款，只能作为审核证据，不能默认作为 settlementAmount。除非飞书知识规则明确该店按最终付款口径对账，settlementAmount 应优先选择能对应 sales_total 或 net_sales_total 的字段，例如销售额、实际销售、销售收入、本期销售额、本期结算、应付金额、销售成本、开票金额等。
+“实销金额”“实际销售”“本期实销”“销售收入”“销售金额”“销售额”“总销售额”“本月销售”“门店销售额”“营业额”等均是扣点前销售口径；“应付销售额”仍是销售额口径，应优先对 sales_total。若表内同时有“净营业额”和“券（折扣）”，且二者相加等于“本月结算营业额小计”，以该小计作为扣点前销售额；没有小计时才计算“净营业额＋券（折扣）”。不要把小计与两个组成项重复相加，settlementAmountLabel 必须写明“本月结算营业额小计（净营业额＋券/折扣）”。
+“含税进价金额”“含税/不含税结账金额”“开票金额”“发票金额”“应付/付款金额”“本期应结”等是扣点、费用或税额处理后的字段，只能作为销售额口径和开票金额的辅助证据，不能仅因与 ERP 更接近就替代扣点前销售额。尤其不得根据文件名、备注或“不是含税金额”等字样推断税额口径；只以原件表内的“含税/不含税”字段判断，并在 basisReason 说明实际选取的销售字段。
+若结算单含“补入4月”“在6月补入”“跨月冲回/调整”等说明，仍先按扣点前 sales_total 对比；不得把它误写成“范围不可比”。在 issues 第二句注明“存在跨月调整，需按日销售、退货和调整台账核验”，但不得编造系统没有返回的日明细或调整金额。
+申请开票阶段出现“预览页面”“请勿用来结算”等底纹本身不影响销售额核对，不要仅因底纹输出审核问题；只有原件明确写有草稿、作废、金额未确认或非正式结算单时才作为审核原因。
 如果同组结算单合并后的本期实销/销售额为 0 或负数，不要仅因金额为负就判异常；只要字段口径明确属于销售额口径且与 ERP/DRP sales_total 在 200 元内对平，可输出 matched=true。扣点、手续费、快递费、含税结账金额和最终应付款只作为口径判断证据，除非它们证明 settlementAmount 选错或 ERP/DRP 范围不可比，否则不要写入 issues。
-如果 erpBasis 明确且 difference 绝对值不超过 200 元，应输出 matched=true；普通舍入、尾差或阈值内自然差额不要写入 issues，issues 只记录需要人工审核的异常。
-金额和口径已经可确定且 difference 绝对值不超过 200 元时，只有会影响 settlementAmount 或 ERP/DRP 口径可信度的异常才写入 issues；不要把不影响本次 sales_total/net_sales_total 对比的扣率说明、费用科目说明、内部比例观察写入 issues。
-每份对账结果都必须先核对结算单和 ERP 的扣点档位。无论是否有 issues，basisReason 首句固定为“扣点对比：结算单 X%；ERP Y%；扣点一致/不一致/无法比较。”；扣点一致时，首句还必须写“金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”，后面再简述选用的金额口径。issues 最多只输出两句：第一句固定为“结算单扣点：X%；ERP扣点：Y%。”，X/Y 写已核实的全部扣点档；如扣点档一致，第二句固定写“扣点档一致；金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”；ERP 多出或缺少档位时，第二句直接写出档位及“可能包含其他合同、柜组或活动”。如任一侧未取得可靠分档，明确写“未提取/未提供分档”，不得猜测。不要列计算过程、最接近子集、Agent 理由或补资料建议。最终 JSON 的 salesTotal/netSalesTotal 仍必须是 MCP 返回的全店汇总值，difference 仍按 erpAmount - settlementAmount 填写以满足后端契约。
+如果 erpBasis 明确、结算单与 ERP 的扣点档完整可比且 difference 绝对值不超过 200 元，才可输出 matched=true；普通舍入、尾差或阈值内自然差额不要写入 issues，issues 只记录需要人工审核的异常。
+原件出现“其他扣率”“其他扣点”或“其他费率”且有金额、但没有对应百分比档位、计算依据或合同映射时，这是扣点信息不完整，不是普通手续费：不得忽略。结算单扣点必须写为“已识别档位＋其他扣率金额（未提供档位）”，basisReason 首句写“扣点无法比较”，issues 必须非空，matched 必须为 false，即使金额差绝对值不超过 200 元。只有快递费、手续费、租金、税费、卡费等非扣率费用不会造成扣点档不完整。
+金额和口径已经可确定且 difference 绝对值不超过 200 元时，只有会影响 settlementAmount、扣点完整性或 ERP/DRP 口径可信度的异常才写入 issues；不要把不影响本次 sales_total/net_sales_total 对比的普通费用科目说明、内部比例观察写入 issues。
+每份对账结果都必须先核对结算单和 ERP 的扣点档位。无论是否有 issues，basisReason 首句固定为“扣点对比：结算单 X%；ERP Y%；扣点一致/不一致/无法比较。”；扣点一致时，首句还必须写“金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”，后面再简述选用的金额口径。若存在未提供档位的其他扣率，首句必须写“扣点对比：结算单 X%＋其他扣率金额（未提供档位）；ERP Y%；扣点无法比较。”。issues 最多只输出两句：第一句固定为“结算单扣点：X%；ERP扣点：Y%。”，X/Y 写已核实的全部扣点档；第二句必须保留“金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元”。如扣点档一致，第二句固定写“扣点档一致；金额差：ERP <erpAmount> − 结算单 <settlementAmount> = <difference> 元。”；存在未提供档位的其他扣率时，第二句写“扣点分档未完整提供；金额差：…；需确认其他扣率对应的合同或活动。”；ERP 多出或缺少档位时，第二句写“ERP 多出/缺少 X 档；金额差：…；扣点/范围未对齐，差异金额仅用于定位，不能直接判定销售额不一致。”。如结算单没有直接列扣点档、但同一销售口径同时明确列出“提成/扣点金额”和“销售额”，可反算一个综合扣点（提成/扣点金额 ÷ 销售额 × 100，先精确计算后按四舍五入保留两位小数；不得估算，也不得把其他扣项金额混入提成/扣点金额）；若同一销售明细明确列出“销售额”和“供应商应得额”，费用和税额另列，且二者差额能由销售额的单一百分比精确解释，也可按（销售额－供应商应得额）÷销售额 × 100 反算。均写成“综合扣点约 X%（按提成金额/销售额推算）”；它只代表综合水平，不得拆成分档或猜测合同档位。其他无法可靠计算的情况才写“未提取/未提供分档”。不要列计算过程、最接近子集、Agent 理由或补资料建议。最终 JSON 的 salesTotal/netSalesTotal 仍必须是 MCP 返回的全店汇总值，difference 仍按 erpAmount - settlementAmount 填写以满足后端契约；仅明确无 ERP/DRP 记录时允许这四个金额字段同时为 null。
 
 当前项目 ERP/DRP MCP 配置：
 - server id：wd3FCVOL5nMNLODNeRfOr
@@ -445,18 +574,18 @@ ${mcpCommand}
 其中字段类型必须依次为：
 - settlementAmount：有限数字，结算单中与 ERP/DRP sales_total 或 net_sales_total 可比的对账金额
 - settlementAmountLabel：非空字符串，结算单中该金额对应的字段名或口径
-- salesTotal：有限数字，ERP/DRP MCP 返回的 sales_total，扣点前销售额
-- netSalesTotal：有限数字，ERP/DRP MCP 返回的 net_sales_total，扣点后金额
+- salesTotal：有限数字，ERP/DRP MCP 返回的 sales_total，扣点前销售额；仅明确无匹配 ERP/DRP 记录时可为 null
+- netSalesTotal：有限数字，ERP/DRP MCP 返回的 net_sales_total，扣点后金额；仅明确无匹配 ERP/DRP 记录时可为 null
 - erpBasis：字符串，只能是 "sales_total"、"net_sales_total"、"ambiguous"
-- erpAmount：有限数字；erpBasis 为 sales_total 时等于 salesTotal，为 net_sales_total 时等于 netSalesTotal，为 ambiguous 时取更接近 settlementAmount 的一个
-- difference：有限数字，必须等于 erpAmount - settlementAmount
+- erpAmount：有限数字；erpBasis 为 sales_total 时等于 salesTotal，为 net_sales_total 时等于 netSalesTotal，为 ambiguous 时取更接近 settlementAmount 的一个；仅明确无匹配 ERP/DRP 记录时可为 null
+- difference：有限数字，必须等于 erpAmount - settlementAmount；仅明确无匹配 ERP/DRP 记录时可为 null
 - matched：布尔值；只有口径明确且差额绝对值不超过 200 元时才可为 true
 - basisReason：非空字符串，说明选择该口径的结算单字段、店铺规则或业务证据
 - issues：字符串；没有内容时输出空字符串
 - period: 字符串，对账月份，格式必须为 "YYYY-MM"
 - name: 非空字符串，必须是本次用于查询 ERP/DRP MCP 的结算主体标识
 
-字段业务含义、金额口径和适用范围只以本次 Session 中加载的飞书知识规则快照为准；金额或字段缺失、未调用 MCP、无法得到可靠 A/B 或算不出合法 difference 时不要编造，后端会拒绝不符合契约的结果。`;
+字段业务含义、金额口径和适用范围只以本次 Session 中加载的飞书知识规则快照为准；金额或字段缺失、未调用 MCP、无法得到可靠 A/B 或算不出合法 difference 时不要编造。只有 MCP 已明确返回无匹配记录时才使用上述四个 null 字段组合；其他不符合契约的结果仍会被后端拒绝。`;
 }
 
 function resolveProjectRootFromTaskWorkDir(taskWorkDir: string) {

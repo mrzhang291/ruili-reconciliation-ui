@@ -1,4 +1,4 @@
-# 锐力对账系统 · 后端 + 数据库搭建指南（Codex 任务书）
+# Reconciliation Workbench · 后端 + 数据库搭建指南（Codex 任务书）
 
 > **阅读对象**：Codex（AI 编码代理）。
 > **目标**：在一个现有 Vite + React 纯前端项目上，新增一个 Node.js + TypeScript + PostgreSQL + Prisma 后端，把当前"内存态对账数据"迁移到数据库，并把调用 CherryStudio agent 的逻辑从前端搬到后端。
@@ -461,7 +461,7 @@ await prisma.$transaction(async (tx) => {
 DATABASE_URL="postgresql://user:password@localhost:5432/reconciliation?schema=public"
 CHERRYSTUDIO_BASE_URL="http://127.0.0.1:24333"
 CHERRYSTUDIO_API_KEY="your-key"
-CHERRYSTUDIO_DEFAULT_AGENT_NAME="锐力体育"
+CHERRYSTUDIO_DEFAULT_AGENT_NAME="对账助手"
 CHERRYSTUDIO_DEFAULT_AGENT_WORKSPACE=""
 UPLOAD_DIR="/data/files"       # 文件磁盘目录
 PORT=3001

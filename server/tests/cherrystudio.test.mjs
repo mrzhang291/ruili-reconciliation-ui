@@ -72,10 +72,30 @@ test("requires review when rate evidence is missing or mismatched even if amount
   })));
 
   assert.equal(missing?.matched, false);
-  assert.equal(missing?.issues[0].rowLabel, "扣点待核对");
+  assert.equal(missing?.issues[0].rowLabel, "扣点信息待确认");
   assert.equal(mismatch?.matched, false);
-  assert.equal(mismatch?.issues[0].rowLabel, "扣点待核对");
+  assert.equal(mismatch?.issues[0].rowLabel, "扣点不一致");
   assert.match(mismatch?.issues[0].message ?? "", /ERP扣点：0%/);
+});
+
+test("requires rate review when an additional settlement deduction has no declared rate", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 225111.25,
+    settlementAmountLabel: "本期实销金额",
+    salesTotal: 225100,
+    netSalesTotal: 197000,
+    erpBasis: "sales_total",
+    erpAmount: 225100,
+    difference: -11.25,
+    matched: true,
+    basisReason: "扣点对比：结算单 12.5%，另列其他扣率金额（未提供档位）；ERP 12.5%。",
+    issues: "扣点分档未完整提供。",
+    name: "HZAD71",
+  })));
+
+  assert.equal(result?.matched, false);
+  assert.equal(result?.issues[0].rowLabel, "扣点信息待确认");
+  assert.match(result?.issues[0].message ?? "", /扣点分档未完整提供/);
 });
 
 test("does not treat an ERP missing-rate explanation as an ERP rate", () => {
@@ -93,8 +113,48 @@ test("does not treat an ERP missing-rate explanation as an ERP rate", () => {
   })));
 
   assert.equal(result?.matched, false);
-  assert.equal(result?.issues[0].rowLabel, "扣点待核对");
+  assert.equal(result?.issues[0].rowLabel, "扣点不一致");
   assert.match(result?.issues[0].message ?? "", /ERP缺少12%、14%档/);
+});
+
+test("does not treat an ERP unreturned-rate explanation as an ERP rate", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 96493,
+    settlementAmountLabel: "实际销售合计",
+    salesTotal: 96499,
+    netSalesTotal: 83431.44,
+    erpBasis: "sales_total",
+    erpAmount: 96499,
+    difference: 6,
+    matched: true,
+    basisReason: "扣点对比：结算单15%、10%、12%；ERP 15%、10%；扣点不一致。",
+    issues: "结算单扣点：15%、10%、12%；ERP扣点：15%、10%。结算单含12%扣点，ERP未返回12%档，可能包含其他合同、柜组或活动。",
+    name: "HZSC37",
+  })));
+
+  assert.equal(result?.matched, false);
+  assert.equal(result?.issues[0].rowLabel, "扣点不一致");
+  assert.match(result?.issues[0].message ?? "", /ERP扣点：15%、10%/);
+  assert.doesNotMatch(result?.issues[0].message ?? "", /ERP扣点：15%、10%、12%/);
+});
+
+test("does not count retention-rate conversion inputs as deduction rates", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 102627.9,
+    settlementAmountLabel: "实际销售合计（扣点前销售额）",
+    salesTotal: 102627.9,
+    netSalesTotal: 92779.86,
+    erpBasis: "sales_total",
+    erpAmount: 102627.9,
+    difference: 0,
+    matched: true,
+    basisReason: "扣点对比：结算单8%、10%（由提成率92%、90%换算）；ERP 8%、10%；扣点一致。",
+    issues: "",
+    name: "HZNK46",
+  })));
+
+  assert.equal(result?.matched, true);
+  assert.deepEqual(result?.issues, []);
 });
 
 test("extracts the final contract JSON when earlier tool JSON is mixed into text", () => {
@@ -214,7 +274,8 @@ test("keeps ambiguous basis as a review item and uses the closest ERP amount", (
   assert.equal(result?.matched, false);
   assert.equal(result?.erpAmount, 100);
   assert.equal(result?.difference, -1);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。需确认结算金额是否已扣点。");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 100\.00 − 结算单 101\.00 = -1\.00 元/);
+  assert.match(result?.issues[0].message ?? "", /需确认结算金额是否已扣点/);
 });
 
 test("combines backend basis and threshold checks into one review item", () => {
@@ -232,7 +293,8 @@ test("combines backend basis and threshold checks into one review item", () => {
 
   assert.equal(result?.matched, false);
   assert.equal(result?.issues.length, 1);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。需确认结算金额是否已扣点。");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 500\.00 − 结算单 100\.00 = 400\.00 元/);
+  assert.match(result?.issues[0].message ?? "", /需确认结算金额是否已扣点/);
 });
 
 test("corrects obvious pre-deduction settlement labels back to sales_total", () => {
@@ -252,7 +314,8 @@ test("corrects obvious pre-deduction settlement labels back to sales_total", () 
   assert.equal(result?.erpBasis, "sales_total");
   assert.equal(result?.erpAmount, 411573);
   assert.equal(result?.difference, -27923);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。需确认结算金额是否已扣点。");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 411,573\.00 − 结算单 439,496\.00 = -27,923\.00 元/);
+  assert.match(result?.issues[0].message ?? "", /需确认结算金额是否已扣点/);
   assert.equal(result?.rawAgentPayload.erpBasis, "net_sales_total");
   assert.equal(result?.rawAgentPayload.declaredErpBasis, "net_sales_total");
   assert.equal(result?.rawAgentPayload.appliedErpBasis, "sales_total");
@@ -277,10 +340,33 @@ test("keeps sales labels on sales_total even when net_sales_total is closer", ()
   assert.equal(result?.erpAmount, 558398.7);
   assert.equal(result?.difference, 242622.43);
   assert.equal(result?.issues[0].differenceAmount, 242622.43);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。结算单或 ERP 未提供完整扣点分档，需核对柜组、合同或活动范围。");
+  assert.equal(result?.issues[0].rowLabel, "销售范围待确认");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 558,398\.70 − 结算单 315,776\.27 = 242,622\.43 元/);
+  assert.match(result?.issues[0].message ?? "", /差异金额仅用于定位，不能直接判定销售额不一致/);
   assert.equal(result?.rawAgentPayload.declaredErpBasis, "net_sales_total");
   assert.equal(result?.rawAgentPayload.appliedErpBasis, "sales_total");
   assert.equal(result?.rawAgentPayload.scopedErpMismatch, true);
+});
+
+test("uses the net-revenue plus coupon subtotal as pre-deduction sales", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 512047,
+    settlementAmountLabel: "本月结算营业额小计（净营业额+券/折扣）",
+    salesTotal: 512042,
+    netSalesTotal: 424999.01,
+    erpBasis: "sales_total",
+    erpAmount: 512042,
+    difference: -5,
+    matched: true,
+    basisReason: "扣点对比：结算单17%；ERP17%；扣点一致。本月结算营业额小计由净营业额与券（折扣）组成，属于扣点前销售额。",
+    issues: "",
+  })));
+
+  assert.equal(result?.matched, true);
+  assert.equal(result?.erpBasis, "sales_total");
+  assert.equal(result?.erpAmount, 512042);
+  assert.equal(result?.difference, -5);
+  assert.deepEqual(result?.issues, []);
 });
 
 test("does not enlarge standalone zero-sales fee statements to sales_total", () => {
@@ -425,11 +511,12 @@ test("keeps invoice labels on net_sales_total even when sales_total is closer", 
   assert.equal(result?.erpBasis, "net_sales_total");
   assert.equal(result?.erpAmount, 226706.4);
   assert.equal(result?.difference, -44285.3);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。需确认结算金额是否已扣点。");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 226,706\.40 − 结算单 270,991\.70 = -44,285\.30 元/);
+  assert.match(result?.issues[0].message ?? "", /需确认结算金额是否已扣点/);
   assert.equal(result?.rawAgentPayload.appliedErpBasis, "net_sales_total");
 });
 
-test("formats scope mismatch as a concise review conclusion", () => {
+test("formats scope mismatch as a diagnostic conclusion while retaining the amount", () => {
   const result = parseAgentResponse(JSON.stringify(contractResult({
     settlementAmount: 100,
     settlementAmountLabel: "对账金额",
@@ -443,8 +530,10 @@ test("formats scope mismatch as a concise review conclusion", () => {
   })));
 
   assert.equal(result?.issues.length, 1);
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。结算单或 ERP 未提供完整扣点分档，需核对柜组、合同或活动范围。");
-  assert.equal(result?.issues[0].suggestion, "请核对扣点差异档对应的合同、柜组或活动。");
+  assert.equal(result?.issues[0].rowLabel, "销售范围待确认");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 500\.00 − 结算单 100\.00 = 400\.00 元/);
+  assert.match(result?.issues[0].message ?? "", /差异金额仅用于定位，不能直接判定销售额不一致/);
+  assert.equal(result?.issues[0].suggestion, "差异金额仅用于定位；请按合同、柜组或活动范围核对。");
   assert.equal(result?.issues[0].differenceAmount, 400);
 });
 
@@ -462,6 +551,25 @@ test("puts a matched rate comparison before the exact amount difference", () => 
   })));
 
   assert.equal(result?.issues[0].message, "结算单扣点：10%、15%、12%；ERP扣点：10%、15%、12%。扣点档一致；金额差：ERP 377,748.90 − 结算单 377,078.10 = 670.80 元。");
+  assert.equal(result?.issues[0].suggestion, "请核对销售期间、柜组、活动及跨月调整。");
+});
+
+test("keeps a derived settlement rate visible", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 218576,
+    settlementAmountLabel: "销售金额",
+    salesTotal: 272540,
+    netSalesTotal: 248000,
+    erpBasis: "sales_total",
+    erpAmount: 272540,
+    difference: 53964,
+    matched: false,
+    basisReason: "扣点对比：结算单 综合扣点约8.81%（按提成金额/销售额推算）；ERP 8%、10%；扣点不一致。",
+    issues: "结算单扣点：综合扣点约8.81%（按提成金额/销售额推算）；ERP扣点：8%、10%。ERP多出8%、10%档位。",
+  })));
+
+  assert.equal(result?.issues[0].rowLabel, "扣点不一致");
+  assert.match(result?.issues[0].message ?? "", /综合扣点约8\.81%（按提成金额\/销售额推算）/);
 });
 
 test("labels Chinese date ranges as a period review", () => {
@@ -477,7 +585,8 @@ test("labels Chinese date ranges as a period review", () => {
     issues: "结算单账期为2026年05月21日至2026年06月20日，ERP按自然月汇总。",
   })));
 
-  assert.equal(result?.issues[0].message, "结算单扣点：未提取；ERP扣点：未提供分档。结算期间与 ERP 取数期间可能不一致。");
+  assert.match(result?.issues[0].message ?? "", /金额差：ERP 1,943,494\.00 − 结算单 1,807,041\.00 = 136,453\.00 元/);
+  assert.match(result?.issues[0].message ?? "", /结算期间与 ERP 取数期间可能不一致/);
 });
 
 test("treats same-shop multi-rate ERP results as incomparable scope", () => {
@@ -519,9 +628,47 @@ test("does not expose huge sales differences when the Agent reports an obvious s
   assert.match(result?.issues[0].message ?? "", /结算单扣点：未提取；ERP扣点：未提供分档。/);
 });
 
-test("keeps numeric differences out of messages for non-final or mismatched settlement documents", () => {
+test("does not turn an invoice-application watermark into a scope mismatch", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 100,
+    settlementAmountLabel: "本期实销金额",
+    salesTotal: 100,
+    netSalesTotal: 90,
+    erpBasis: "sales_total",
+    erpAmount: 100,
+    difference: 0,
+    matched: false,
+    basisReason: "扣点对比：结算单10%；ERP10%；扣点一致。",
+    issues: "结算单含“预览页面，请勿用来结算”水印，属于申请开票阶段底纹。",
+  })));
+
+  assert.equal(result?.matched, true);
+  assert.equal(result?.rawAgentPayload.scopedErpMismatch, false);
+  assert.deepEqual(result?.issues, []);
+});
+
+test("labels a cross-month sales variance for daily-detail verification", () => {
+  const result = parseAgentResponse(JSON.stringify(contractResult({
+    settlementAmount: 87935.38,
+    settlementAmountLabel: "本期实销金额",
+    salesTotal: 99532.13,
+    netSalesTotal: 78128.72,
+    erpBasis: "sales_total",
+    erpAmount: 99532.13,
+    difference: 11596.75,
+    matched: false,
+    basisReason: "扣点对比：结算单21.5%；ERP21.5%；扣点一致。",
+    issues: "结算单扣点：21.5%；ERP扣点：21.5%。扣点档一致；补入4月 11,806.05 元，在6月补入 209.30 元。",
+  })));
+
+  assert.equal(result?.matched, false);
+  assert.equal(result?.rawAgentPayload.scopedErpMismatch, false);
+  assert.equal(result?.issues[0].message, "结算单扣点：21.5%；ERP扣点：21.5%。扣点档一致；金额差：ERP 99,532.13 − 结算单 87,935.38 = 11,596.75 元。存在跨月调整，需按日销售和调整台账核验。");
+  assert.equal(result?.issues[0].suggestion, "请按日销售、退货和跨月调整台账核验。");
+});
+
+test("preserves numeric differences as diagnostic amounts for scope or basis mismatches", () => {
   for (const issues of [
-    "结算单含“预览页面，请勿用来结算”水印，需核对正式结算单。",
     "文件名账期 2026-08 与正文账期 2026-05 不一致。",
     "结算单扣率 5% 与 ERP 扣率 20% 不一致，当前金额口径冲突。",
   ]) {
@@ -541,7 +688,9 @@ test("keeps numeric differences out of messages for non-final or mismatched sett
     assert.equal(result?.rawAgentPayload.scopedErpMismatch, true);
     assert.equal(result?.issues[0].differenceAmount, 23905.7);
     assert.match(result?.issues[0].message ?? "", /结算单扣点：/);
-    assert.doesNotMatch(result?.issues[0].message ?? "", /23905\.70/);
+    assert.equal(result?.issues[0].rowLabel, issues.includes("扣率") ? "扣点不一致" : "销售范围待确认");
+    assert.match(result?.issues[0].message ?? "", /23,905\.70/);
+    assert.match(result?.issues[0].message ?? "", /差异金额仅用于定位，不能直接判定销售额不一致/);
   }
 });
 
@@ -559,6 +708,7 @@ test("keeps Agent artifacts inside the task work directory", () => {
   assert.doesNotMatch(prompt, /http:\/\/127\.0\.0\.1\/erp/);
   assert.match(prompt, /C:\/runtime\/tasks\/test-task/);
   assert.match(prompt, /不要在项目根目录、源码目录或输入文件旁创建文件/);
+  assert.match(prompt, /不得手工重输、合并重复空格或改写文件名/);
   assert.doesNotMatch(prompt, /ERP：C:\/files\/erp\.xlsx/);
   assert.match(prompt, /结算单1：C:\/files\/settlement\.xlsx/);
   assert.match(prompt, /SHNKA2/);
@@ -576,9 +726,17 @@ test("keeps Agent artifacts inside the task work directory", () => {
   assert.match(prompt, /netSalesTotal/);
   assert.match(prompt, /matched/);
   assert.match(prompt, /sales_total 表示扣点前销售额/);
-  assert.match(prompt, /顶部金额与 ERP\/DRP sales_total 在 200 元内对平/);
+  assert.match(prompt, /本月结算营业额小计.*净营业额.*券/);
+  assert.match(prompt, /不得根据文件名、备注.*推断税额口径/);
+  assert.match(prompt, /底纹本身不影响销售额核对/);
+  assert.match(prompt, /按日销售、退货和调整台账核验/);
   assert.match(prompt, /金额为负就判异常/);
   assert.match(prompt, /可输出 matched=true/);
+  assert.match(prompt, /提成\/扣点金额 ÷ 销售额 × 100，先精确计算后按四舍五入保留两位小数/);
+  assert.match(prompt, /销售额－供应商应得额）÷销售额 × 100/);
+  assert.match(prompt, /不得估算，也不得把其他扣项金额混入提成\/扣点金额/);
+  assert.match(prompt, /其他扣率金额（未提供档位）/);
+  assert.match(prompt, /matched 必须为 false/);
 });
 
 test("multi-file reconciliation prompt requires one combined result", () => {
@@ -604,7 +762,7 @@ test("multi-file reconciliation prompt requires one combined result", () => {
   assert.match(prompt, /同组文件：WHAD28-5月结算单1\.pdf；WHAD28-5月结算单2\.pdf/);
 });
 
-test("reports missing ERP rows from an invalid Agent response as a data issue", async () => {
+test("turns missing ERP rows into a review result instead of an execution failure", async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = config.cherryStudio.apiKey;
   config.cherryStudio.apiKey = "test-api-key";
@@ -624,16 +782,12 @@ test("reports missing ERP rows from an invalid Agent response as a data issue", 
   });
 
   try {
-    await assert.rejects(
-      () => sendReconciliationPrompt({ agentId: "agent-1", agentName: "锐力", sessionId: "session-1" }, "prompt"),
-      (error) => {
-        assert.equal(error.code, "CHERRYSTUDIO_AGENT_INVALID_RESPONSE");
-        assert.match(error.message, /ERP\/DRP 明细缺失/);
-        assert.match(error.message, /WHNK59/);
-        assert.doesNotMatch(error.message, /^Agent 返回格式不符合/);
-        return true;
-      },
-    );
+    const result = await sendReconciliationPrompt({ agentId: "agent-1", agentName: "对账助手", sessionId: "session-1" }, "prompt");
+    assert.equal(result.missingErp, true);
+    assert.equal(result.erpAmount, null);
+    assert.equal(result.difference, null);
+    assert.equal(result.issues.length, 1);
+    assert.match(result.issues[0].message, /WHNK59/);
   } finally {
     globalThis.fetch = originalFetch;
     config.cherryStudio.apiKey = originalApiKey;
@@ -656,7 +810,7 @@ test("paginates agents and creates a new session", async () => {
       });
     }
     if (url.includes("offset=100")) {
-      return Response.json({ data: [{ id: "agent-target", name: "锐力" }], total: 101 });
+      return Response.json({ data: [{ id: "agent-target", name: "对账助手" }], total: 101 });
     }
     if (url.endsWith("/v1/agents/agent-target/sessions")) {
       assert.equal(init.method, "POST");
@@ -669,10 +823,10 @@ test("paginates agents and creates a new session", async () => {
   };
 
   try {
-    const target = await resolveAgentSession({ name: "锐力" }, knowledgeInstructions);
+    const target = await resolveAgentSession({ name: "对账助手" }, knowledgeInstructions);
     assert.deepEqual(target, {
       agentId: "agent-target",
-      agentName: "锐力",
+      agentName: "对账助手",
       sessionId: "session-new",
     });
     assert.equal(calls.length, 3);

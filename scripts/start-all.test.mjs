@@ -4,7 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { assertPrivateNodeModules, backendHealthy, setEnvValue } from "./start-all.mjs";
+import { assertPrivateNodeModules, backendHealthy, setEnvValue, waitForPortClosed } from "./start-all.mjs";
 import { friendlyConnectionError } from "./config-server.mjs";
 import { keychainArguments, protectSecret, unprotectSecret } from "./local-config.mjs";
 
@@ -42,6 +42,19 @@ test("backend success requires CherryStudio and Feishu Base health", async () =>
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try { assert.equal(await backendHealthy(server.address().port), true); }
   finally { await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+});
+
+test("launcher waits for a restarted port to be released", async () => {
+  const server = http.createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    assert.equal(await waitForPortClosed(port, { timeoutMs: 30, intervalMs: 5 }), false);
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    assert.equal(await waitForPortClosed(port, { timeoutMs: 1_000, intervalMs: 5 }), true);
+  } finally {
+    if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("launcher rejects shared node_modules and has no database startup path", async () => {

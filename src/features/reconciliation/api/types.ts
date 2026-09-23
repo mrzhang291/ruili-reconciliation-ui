@@ -20,10 +20,18 @@ import type {
   PaginatedTasks,
   ReconciliationStatistics,
   ReconciliationReviewRow,
+  ReconciliationReviewWorklistRow,
   ReconciliationTaskDetail,
   ReconciliationTaskSummary,
   ReviewItemStatus,
 } from "../model/types";
+
+export type ReviewExportFilters = {
+  region?: string;
+  status?: ReviewItemStatus;
+  differenceMin?: number;
+  differenceMax?: number;
+};
 
 export interface ReconciliationApi {
   createTask(input: CreateReconciliationTaskInput): Promise<ReconciliationTaskSummary>;
@@ -33,6 +41,7 @@ export interface ReconciliationApi {
   updateBatchDocumentIdentity(documentId: string, input: UpdateBatchDocumentIdentityInput): Promise<BatchPrecheckResult>;
   selectBatchDocumentAmount(documentId: string, input: SelectBatchDocumentAmountInput): Promise<BatchPrecheckResult>;
   exportBatchCsv(batchId: string): Promise<void>;
+  exportReviewCsv(filters?: ReviewExportFilters): Promise<void>;
   listErpRecords(params?: ListErpRecordsParams): Promise<PaginatedErpRecords>;
   getErpFilterOptions(): Promise<ErpFilterOptions>;
   createErpRecord(input: ErpRecordInput): Promise<ErpRecord>;
@@ -42,6 +51,7 @@ export interface ReconciliationApi {
   importErpFile(input: ImportErpFileInput): Promise<ErpImportResult>;
   listTasks(params?: ListReconciliationTasksParams): Promise<PaginatedTasks>;
   listReviewItems(): Promise<ReconciliationReviewRow[]>;
+  listReviewWorklist(): Promise<ReconciliationReviewWorklistRow[]>;
   getTask(taskId: string): Promise<ReconciliationTaskDetail>;
   stopTask(taskId: string): Promise<void>;
   deleteTask(taskId: string): Promise<void>;

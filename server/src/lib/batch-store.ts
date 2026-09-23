@@ -3,12 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { extractShopCodesFromFileName } from "./erp-base-query.js";
-import { normalizeFileName, type StoredFile } from "./file-storage.js";
+import { moveStoredUploadFile, normalizeFileName, type StoredFile } from "./file-storage.js";
 import { findCreatedRecordId, formatDateTime, rowsFromPage } from "./lark-store.js";
 import { projectRoot, relativeCliPath, runLarkCli } from "./lark-cli.js";
 
 export type BatchDocumentStatus =
   | "READY"
+  | "QUEUED"
   | "NEEDS_REVIEW"
   | "REJECTED"
   | "DUPLICATE"
@@ -20,6 +21,7 @@ export type BatchDocumentStatus =
 export type BatchStatus =
   | "DRAFT"
   | "READY"
+  | "QUEUED"
   | "PROCESSING"
   | "NEEDS_REVIEW"
   | "COMPLETED"
@@ -221,25 +223,23 @@ function resolveBatchStatePath(batchId: string) {
 
 export function saveBatchUploadedFile(
   batchId: string,
-  buffer: Buffer,
-  originalName: string,
-  contentType = "application/octet-stream",
+  uploaded: StoredFile,
 ): StoredFile {
   const directory = path.join(resolveBatchDirectory(batchId), "files");
   fs.mkdirSync(directory, { recursive: true });
   const id = crypto.randomUUID();
-  const safeName = normalizeFileName(originalName) || `${id}${path.extname(originalName)}`;
+  const safeName = normalizeFileName(uploaded.originalName) || `${id}${uploaded.extension}`;
   const fileDirectory = path.join(directory, id);
   fs.mkdirSync(fileDirectory, { recursive: true });
   const absolutePath = path.join(fileDirectory, safeName);
-  fs.writeFileSync(absolutePath, buffer);
+  moveStoredUploadFile(uploaded.absolutePath, absolutePath);
   return {
     id,
     extension: path.extname(safeName).toLowerCase(),
     absolutePath,
     originalName: safeName,
-    contentType,
-    sizeBytes: buffer.length,
+    contentType: uploaded.contentType,
+    sizeBytes: uploaded.sizeBytes,
   };
 }
 
@@ -396,7 +396,7 @@ function asDate(value: string | null | undefined) {
 function countDocuments(state: BatchState) {
   const valid = state.documents.filter((doc) => doc.status !== "REJECTED" && doc.status !== "DUPLICATE");
   const executionGroups = buildBatchExecutionGroups(state);
-  const pending = state.documents.filter((doc) => doc.status === "READY" || doc.status === "PROCESSING").length;
+  const pending = state.documents.filter((doc) => ["READY", "QUEUED", "PROCESSING"].includes(doc.status)).length;
   const needsReview = state.documents.filter((doc) => doc.status === "NEEDS_REVIEW").length;
   const succeeded = state.documents.filter((doc) => doc.status === "SUCCEEDED").length;
   const failed = state.documents.filter((doc) => doc.status === "FAILED").length;
@@ -558,6 +558,7 @@ export function rebuildBatchGroups(state: BatchState) {
     for (const document of documents) document.groupId = id;
     const statuses = documents.map((document) => document.status);
     const status: BatchDocumentStatus = statuses.includes("PROCESSING") ? "PROCESSING"
+      : statuses.includes("QUEUED") ? "QUEUED"
       : statuses.includes("FAILED") ? "FAILED"
         : statuses.includes("CANCELLED") ? "CANCELLED"
           : statuses.includes("NEEDS_REVIEW") ? "NEEDS_REVIEW"
@@ -603,8 +604,9 @@ export function rebuildBatchGroups(state: BatchState) {
 
   const statuses = state.documents.map((document) => document.status);
   state.status = statuses.includes("PROCESSING") ? "PROCESSING"
-    : statuses.some((status) => status === "FAILED") && !statuses.some((status) => ["READY", "PROCESSING"].includes(status)) ? "FAILED"
-      : statuses.some((status) => status === "CANCELLED") && !statuses.some((status) => ["READY", "PROCESSING"].includes(status)) ? "CANCELLED"
+    : statuses.includes("QUEUED") ? "QUEUED"
+      : statuses.some((status) => status === "FAILED") && !statuses.some((status) => ["READY", "QUEUED", "PROCESSING"].includes(status)) ? "FAILED"
+        : statuses.some((status) => status === "CANCELLED") && !statuses.some((status) => ["READY", "QUEUED", "PROCESSING"].includes(status)) ? "CANCELLED"
         : statuses.some((status) => status === "READY") ? "READY"
           : statuses.some((status) => status === "NEEDS_REVIEW") ? "NEEDS_REVIEW"
             : statuses.some((status) => status === "SUCCEEDED") ? "COMPLETED"
@@ -747,6 +749,7 @@ function consistentPreferredGroupBasis(documents: BatchDocumentState[]) {
 
 function preferredGroupBasisFromSettlementLabel(label: string) {
   const normalized = label.normalize("NFKC").replace(/\s+/g, "");
+  if (/(?:本月)?结算营业额小计|净营业额.*(?:券|折扣)|(?:券|折扣).*净营业额/.test(normalized)) return "sales_total";
   const salesPattern = /(实销|实际销售|本期实销|销售收入|销售金额|销售额|销售总额|本月销售|门店销售|正常销售|营业额)/;
   const netPattern = /(净营业额|扣点后|提成后|分成后|销售成本|结账金额|结帐金额|结算金额|结算净额|结算款|开票|发票|实际应付|实际付款|应付金额|付款金额|得款|供应商应得|供应商应开发票|本期应结|价税合计)/;
   if (salesPattern.test(normalized) && !netPattern.test(normalized)) return "sales_total";

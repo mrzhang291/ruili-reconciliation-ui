@@ -3,10 +3,12 @@ import express from "express";
 import { checkCherryStudioConnection } from "./lib/cherrystudio.js";
 import { config } from "./lib/config.js";
 import { larkConnectionStatus } from "./lib/lark-store.js";
+import { recoverPersistedReconciliationQueue } from "./services/reconciliation.js";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler.js";
 import { batchesRouter } from "./routes/batches.js";
 import { erpRouter } from "./routes/erp.js";
 import { filesRouter } from "./routes/files.js";
+import { mailRouter } from "./routes/mail.js";
 import { reviewItemsRouter } from "./routes/review-items.js";
 import { statisticsRouter } from "./routes/statistics.js";
 import { tasksRouter } from "./routes/tasks.js";
@@ -45,6 +47,7 @@ async function main() {
   app.use("/api/tasks", tasksRouter);
   app.use("/api/tasks", reviewItemsRouter);
   app.use("/api/tasks", filesRouter);
+  app.use("/api/mail", mailRouter);
   app.use("/api/erp", erpRouter);
   app.use("/api/statistics", statisticsRouter);
   app.use(notFoundHandler);
@@ -53,6 +56,8 @@ async function main() {
   app.listen(config.port, config.host, () => {
     console.log(`[server] 本地兼容接口已启动: http://${config.host}:${config.port}`);
     console.log(`[server] 持久化存储: 飞书多维表格 ${config.lark.baseToken}`);
+    const recovered = recoverPersistedReconciliationQueue();
+    if (recovered) console.log(`[server] 已恢复 ${recovered} 个持久化对账队列任务`);
   });
 }
 

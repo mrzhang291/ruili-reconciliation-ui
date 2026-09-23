@@ -1,9 +1,5 @@
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { Router } from "express";
-import multer from "multer";
-import { config } from "../lib/config.js";
 import { ErpBaseQueryError, queryErpReconciliationData } from "../lib/erp-base-query.js";
 import { ErpImportError, importErpWorkbook, type ErpImportMode } from "../lib/erp-import.js";
 import { invalidateReadCache } from "../lib/read-cache.js";
@@ -18,10 +14,10 @@ import {
   type ErpSortDirection,
   type ErpSortField,
 } from "../lib/erp-records.js";
-import { normalizeFileName } from "../lib/file-storage.js";
+import { createStreamingUpload, deleteStoredFilePath, normalizeFileName } from "../lib/file-storage.js";
 
 export const erpRouter = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadBytes } });
+const upload = createStreamingUpload(1);
 const excelExtensions = new Set([".xlsx", ".xls", ".xlsm"]);
 const excelMimeTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -127,7 +123,6 @@ erpRouter.delete("/:id", async (req, res, next) => {
 });
 
 erpRouter.post("/import", upload.single("erpFile"), async (req, res, next) => {
-  let tempDir: string | null = null;
   try {
     const file = req.file;
     if (!file) {
@@ -147,11 +142,8 @@ erpRouter.post("/import", upload.single("erpFile"), async (req, res, next) => {
       return res.status(400).json({ error: { code: "ERP_IMPORT_INVALID_MODE", message: "mode 只支持 preview、append 或 replace", requestId: crypto.randomUUID() } });
     }
 
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ruili-erp-"));
-    const tempFile = path.join(tempDir, `erp${extension}`);
-    await fs.writeFile(tempFile, file.buffer);
     const data = await importErpWorkbook({
-      filePath: tempFile,
+      filePath: file.path,
       fileName,
       mode,
       month: typeof req.body?.month === "string" ? req.body.month.trim() || undefined : undefined,
@@ -165,7 +157,15 @@ erpRouter.post("/import", upload.single("erpFile"), async (req, res, next) => {
     }
     next(error);
   } finally {
-    if (tempDir) await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    if (req.file) {
+      try {
+        deleteStoredFilePath(req.file.path);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+          console.error("[erp] 清理上传临时文件失败", error);
+        }
+      }
+    }
   }
 });
 
