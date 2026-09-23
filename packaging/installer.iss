@@ -12,9 +12,9 @@
 
 [Setup]
 AppId={{43CB0103-11B6-487A-B3A8-78E022B9F9C2}
-AppName=锐力对账系统
+AppName=Reconciliation Workbench
 AppVersion={#AppVersion}
-AppPublisher=锐力
+AppPublisher=Reconciliation Workbench
 DefaultDirName={localappdata}\Programs\BillCompare
 DefaultGroupName=BillCompare
 DisableProgramGroupPage=yes
@@ -30,11 +30,11 @@ WizardStyle=modern
 SetupLogging=yes
 CloseApplications=yes
 RestartApplications=no
-UninstallDisplayName=锐力对账系统
+UninstallDisplayName=Reconciliation Workbench
 VersionInfoVersion={#AppVersion}
-VersionInfoCompany=锐力
-VersionInfoDescription=锐力对账系统安装程序
-VersionInfoProductName=锐力对账系统
+VersionInfoCompany=Reconciliation Workbench
+VersionInfoDescription=Reconciliation Workbench installer
+VersionInfoProductName=Reconciliation Workbench
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -46,7 +46,7 @@ Name: "{group}\Stop BillCompare"; Filename: "{app}\stop-billcompare.cmd"; Workin
 Name: "{group}\Uninstall BillCompare"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\start-billcompare.cmd"; Description: "启动锐力对账系统"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent shellexec
+Filename: "{app}\start-billcompare.cmd"; Description: "启动 Reconciliation Workbench"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent shellexec
 
 [UninstallRun]
 Filename: "{app}\stop-billcompare.cmd"; RunOnceId: "StopBillCompare"; Flags: runhidden

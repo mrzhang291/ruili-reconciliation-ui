@@ -26,7 +26,7 @@ test("builds the Vite reconciliation shell", async () => {
   const client = await readBuiltClient();
 
   assert.match(html, /<div id="root"><\/div>/);
-  assert.match(html, /<title>锐力对账｜财务协同工作台<\/title>/);
+  assert.match(html, /<title>对账协同工作台<\/title>/);
   assert.match(html, /\/assets\/index-[^"]+\.js/);
   assert.doesNotMatch(html, /vinext|cloudflare|worker/i);
   assert.doesNotMatch(client, /vinext|cloudflare|wrangler|next\/headers|next\/font/i);
@@ -165,7 +165,7 @@ test("routes reconciliation through the HTTP backend", async () => {
   assert.match(httpClient, /listReviewItems/);
   assert.match(httpClient, /listReviewWorklist/);
   assert.match(httpClient, /review-items\/worklist/);
-  const worklistSource = httpClient.match(/async listReviewWorklist[\s\S]*?\n {2}}\n\n {2}async getTask/)?.[0] ?? "";
+  const worklistSource = httpClient.match(/async listReviewWorklist[\s\S]*?\r?\n {2}}\r?\n\r?\n {2}async getTask/)?.[0] ?? "";
   assert.match(worklistSource, /cache: "no-store"/);
   assert.doesNotMatch(worklistSource, /this\.cached\(/);
   assert.match(httpClient, /exportReviewCsv/);

@@ -15,7 +15,7 @@ export function useStartReconciliation() {
   const [settlementFile, setSettlementFile] = useState<File | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchRejectedFiles, setBatchRejectedFiles] = useState<BatchRejectedFile[]>([]);
-  const [agentName, setAgentName] = useState("锐力");
+  const [agentName, setAgentName] = useState("财务对账助手");
   const [agentWorkspace, setAgentWorkspace] = useState("");
   const [formError, setFormError] = useState("");
 

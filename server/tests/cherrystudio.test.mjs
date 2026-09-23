@@ -782,7 +782,7 @@ test("turns missing ERP rows into a review result instead of an execution failur
   });
 
   try {
-    const result = await sendReconciliationPrompt({ agentId: "agent-1", agentName: "锐力", sessionId: "session-1" }, "prompt");
+    const result = await sendReconciliationPrompt({ agentId: "agent-1", agentName: "对账助手", sessionId: "session-1" }, "prompt");
     assert.equal(result.missingErp, true);
     assert.equal(result.erpAmount, null);
     assert.equal(result.difference, null);
@@ -810,7 +810,7 @@ test("paginates agents and creates a new session", async () => {
       });
     }
     if (url.includes("offset=100")) {
-      return Response.json({ data: [{ id: "agent-target", name: "锐力" }], total: 101 });
+      return Response.json({ data: [{ id: "agent-target", name: "对账助手" }], total: 101 });
     }
     if (url.endsWith("/v1/agents/agent-target/sessions")) {
       assert.equal(init.method, "POST");
@@ -823,10 +823,10 @@ test("paginates agents and creates a new session", async () => {
   };
 
   try {
-    const target = await resolveAgentSession({ name: "锐力" }, knowledgeInstructions);
+    const target = await resolveAgentSession({ name: "对账助手" }, knowledgeInstructions);
     assert.deepEqual(target, {
       agentId: "agent-target",
-      agentName: "锐力",
+      agentName: "对账助手",
       sessionId: "session-new",
     });
     assert.equal(calls.length, 3);

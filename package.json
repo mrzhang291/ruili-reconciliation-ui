@@ -1,5 +1,6 @@
 {
-  "name": "ruili-reconciliation-ui",
+  "name": "reconciliation-workbench",
+  "description": "A local-first, evidence-driven reconciliation operations platform.",
   "version": "0.1.0",
   "private": true,
   "engines": {

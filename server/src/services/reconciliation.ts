@@ -500,7 +500,7 @@ export function buildReconciliationPrompt(params: {
   const projectRoot = resolveProjectRootFromTaskWorkDir(params.taskWorkDir);
   const mineruScriptPath = path.join(projectRoot, ".claude", "my_script", "mineru_to_markdown.py");
   const shellProjectRoot = toSingleQuotedShellPath(projectRoot);
-  const mcpCommand = `cd ${shellProjectRoot} && { printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'; sleep 1; printf '%s\\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_store_period","arguments":{"mall_name":"<替换为name>","period":"<替换为period>"}}}'; sleep 2; } | RUILI_RECONCILIATION_API=http://127.0.0.1:${config.port} node scripts/erp-base-mcp.mjs`;
+  const mcpCommand = `cd ${shellProjectRoot} && { printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'; sleep 1; printf '%s\\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_store_period","arguments":{"mall_name":"<替换为name>","period":"<替换为period>"}}}'; sleep 2; } | RECONCILIATION_API=http://127.0.0.1:${config.port} node scripts/erp-base-mcp.mjs`;
   const hints = [
     params.settlementHint?.name ? `- 参考主体：${params.settlementHint.name}` : "",
     params.settlementHint?.period ? `- 参考账期：${params.settlementHint.period}` : "",

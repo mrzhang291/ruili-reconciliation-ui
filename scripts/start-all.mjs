@@ -272,7 +272,7 @@ function openBrowser() {
 }
 
 async function main() {
-  log("===== 锐力对账系统一键启动 =====");
+  log("===== 智能对账工作台一键启动 =====");
   ensureLocalEnvFiles();
   ensureDependencies();
   assertPrerequisites();

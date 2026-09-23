@@ -35,7 +35,7 @@ test("project MCP exposes ERP reconciliation totals from the backend", async (t)
     cwd: new URL("..", import.meta.url),
     env: {
       ...process.env,
-      RUILI_RECONCILIATION_API: `http://127.0.0.1:${address.port}`,
+      RECONCILIATION_API: `http://127.0.0.1:${address.port}`,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -67,7 +67,7 @@ test("project MCP exposes ERP reconciliation totals from the backend", async (t)
   })}\n`);
 
   await waitFor(() => messages.length >= 3);
-  assert.equal(messages[0].result.serverInfo.name, "ruili-feishu-base-erp");
+  assert.equal(messages[0].result.serverInfo.name, "feishu-base-erp-reconciliation");
   assert.ok(messages[1].result.tools.some((tool) => tool.name === "summarize_store_period"));
   const result = JSON.parse(messages[2].result.content[0].text);
   assert.equal(result.sales_total, 100);

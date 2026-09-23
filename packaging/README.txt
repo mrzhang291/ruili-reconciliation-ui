@@ -1,4 +1,4 @@
-锐力对账系统（BillCompare）
+Reconciliation Workbench
 
 安装目录：%LOCALAPPDATA%\Programs\BillCompare
 
@@ -10,7 +10,7 @@
 使用前请确认：
 - CherryStudio Enterprise 已安装并启动。
 - CherryStudio API 服务已监听 127.0.0.1:24333。
-- 已创建名为“锐力”的对账 Agent。
+- 已创建名为“对账助手”的对账 Agent。
 - 电脑可以访问业务服务器。
 
 如需停止后台服务，请从开始菜单运行“Stop BillCompare”。

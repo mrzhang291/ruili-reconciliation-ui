@@ -10,8 +10,8 @@ export function AppSidebar({ view, onViewChange }: AppSidebarProps) {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark">R</div>
-        <div><strong>锐力对账</strong><span>财务协同工作台</span></div>
+        <div className="brand-mark">对</div>
+        <div><strong>对账协同工作台</strong><span>财务数据协同平台</span></div>
       </div>
       <nav aria-label="主导航">
         <span className="nav-label">工作台</span>
@@ -27,8 +27,8 @@ export function AppSidebar({ view, onViewChange }: AppSidebarProps) {
         <button type="button" className={view === "settings" ? "active" : ""} onClick={() => onViewChange("settings")}><i>连</i><span>连接设置</span></button>
       </nav>
       <div className="sidebar-footer">
-        <div className="avatar">V</div>
-        <div><strong>财务管理员</strong><span>锐力贸易 · 财务部</span></div>
+        <div className="avatar">管</div>
+        <div><strong>系统管理员</strong><span>财务协同中心</span></div>
         <button type="button" aria-label="更多账户选项">•••</button>
       </div>
     </aside>

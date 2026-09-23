@@ -42,7 +42,7 @@ export const config = {
   cherryStudio: {
     baseUrl: (process.env.CHERRYSTUDIO_BASE_URL || "http://127.0.0.1:24333").replace(/\/$/, ""),
     apiKey: process.env.CHERRYSTUDIO_API_KEY || "",
-    defaultAgentName: process.env.CHERRYSTUDIO_DEFAULT_AGENT_NAME || "锐力",
+    defaultAgentName: process.env.CHERRYSTUDIO_DEFAULT_AGENT_NAME || "对账助手",
     defaultAgentWorkspace: process.env.CHERRYSTUDIO_DEFAULT_AGENT_WORKSPACE || "",
     lookupTimeoutMs: intFromEnv("CHERRYSTUDIO_LOOKUP_TIMEOUT_MS", 15_000),
     requestTimeoutMs: intFromEnv("CHERRYSTUDIO_REQUEST_TIMEOUT_MS", 20 * 60 * 1000),

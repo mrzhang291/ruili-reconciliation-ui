@@ -16,7 +16,7 @@ function queuedRun(taskId) {
   return {
     taskId,
     batchId: "batch-real",
-    agentSelector: { name: "锐力" },
+    agentSelector: { name: "对账助手" },
     settlements: [],
   };
 }

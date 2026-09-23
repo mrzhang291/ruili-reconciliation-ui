@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const apiBase = (process.env.RUILI_RECONCILIATION_API || "http://127.0.0.1:3001").replace(/\/$/, "");
+const apiBase = (process.env.RECONCILIATION_API || "http://127.0.0.1:3001").replace(/\/$/, "");
 
 const inputSchema = {
   type: "object",
@@ -78,7 +78,7 @@ async function handleLine(line) {
       writeResult(message.id, {
         protocolVersion: message.params?.protocolVersion || "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "ruili-feishu-base-erp", version: "1.0.0" },
+        serverInfo: { name: "feishu-base-erp-reconciliation", version: "1.0.0" },
       });
       return;
     }

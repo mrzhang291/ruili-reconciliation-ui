@@ -265,7 +265,7 @@ export function BatchReconciliationView() {
           <span>CHERRYSTUDIO TARGET</span>
           <div>
             <h2 id="batch-agent-selector-title">选择对账 Agent</h2>
-            <p>批量中的每份结算单都会使用同一个 Agent，默认使用锐力。</p>
+            <p>批量中的每份结算单都会使用同一个 Agent，默认使用财务对账助手。</p>
           </div>
         </div>
         <div className="agent-selector__fields">
